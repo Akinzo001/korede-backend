@@ -1,10 +1,3 @@
-// `std` means "standard library". These are built into Rust.
-//
-// `env` lets us read environment variables like DATABASE_URL.
-// `SocketAddr` represents an IP address + port, for example:
-// 127.0.0.1:4000
-use std::{env, net::SocketAddr};
-
 // This project has both:
 // 1. a library crate: `src/lib.rs`
 // 2. a binary crate: `src/main.rs`
@@ -24,12 +17,13 @@ use korede_backend::{
     // GET /health
     // GET /health/db
     api::{AppState, app},
-};
 
-// `tracing_subscriber` configures logging for the application.
-// `tracing::info!`, `tracing::error!`, etc. need a subscriber
-// to decide how logs should be printed.
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    // `AppConfig` is the central place where environment variables
+    // are loaded and validated.
+    //
+    // `init_tracing` configures logging/tracing for the whole app.
+    infrastructure::{config::AppConfig, logging::init_tracing},
+};
 
 // Rust's normal `main` function cannot use `.await` by itself.
 //
@@ -44,57 +38,27 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 // Tokio is the async engine that Axum uses under the hood.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load environment variables from the `.env` file into the process.
+    // Configure application logging/tracing once, at startup.
     //
-    // Example from `.env`:
-    // DATABASE_URL=postgres://postgres:postgres@localhost:5432/korede_backend
-    //
-    // `.ok()` means:
-    // "If loading `.env` fails, don't crash here."
-    //
-    // This is useful because in production you may not use a `.env` file.
-    // The environment variables may already be provided by the server.
-    dotenvy::dotenv().ok();
+    // This handles logs from your own code, plus request logs from
+    // the HTTP tracing middleware.
+    init_tracing();
 
-    // Configure application logging.
+    // Load and validate environment variables.
     //
-    // Think of this as saying:
-    // "When the app logs something, print it nicely to the terminal."
-    tracing_subscriber::registry()
-        .with(
-            // Try to read a logging filter from the environment.
-            //
-            // Example:
-            // RUST_LOG=debug
-            //
-            // If RUST_LOG exists, Rust will use it.
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                // If RUST_LOG does not exist, use this default:
-                //
-                // korede_backend=debug:
-                //   Show debug-level logs from this project.
-                //
-                // tower_http=debug:
-                //   Show debug logs from Tower HTTP middleware if we add it later.
-                .unwrap_or_else(|_| "korede_backend=debug,tower_http=debug".into()),
-        )
-        // Use the default terminal-friendly log format.
-        .with(tracing_subscriber::fmt::layer())
-        // Activate this logging setup globally.
-        .init();
-
-    // Read the DATABASE_URL environment variable.
+    // Required:
+    // - DATABASE_URL
+    // - JWT_SECRET
     //
-    // `env::var("DATABASE_URL")` returns a Result:
-    // - Ok(value) if the variable exists
-    // - Err(...) if it does not exist
+    // Optional, with defaults:
+    // - APP_HOST defaults to 127.0.0.1
+    // - APP_PORT defaults to 4000
+    // - SOLANA_RPC_URL defaults to Solana devnet
     //
-    // `.expect(...)` means:
-    // "If DATABASE_URL is missing, stop the app and show this message."
-    //
-    // We want to stop immediately because the app cannot run without the DB.
-    let database_url =
-        env::var("DATABASE_URL").expect("DATABASE_URL must be set in your .env file");
+    // Optional API keys:
+    // - PAYSTACK_SECRET_KEY
+    // - FLUTTERWAVE_SECRET_KEY
+    let config = AppConfig::from_env()?;
 
     // Create the PostgreSQL connection pool.
     //
@@ -109,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // "If this fails, return the error from main immediately."
     //
     // So if PostgreSQL is not running, this line will fail.
-    let db_pool = connect(&database_url).await?;
+    let db_pool = connect(&config.database.url).await?;
 
     // Run database migrations on startup.
     //
@@ -150,16 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // so handlers can use the database pool when needed.
     let router = app(state);
 
-    // Choose where the server will listen.
-    //
-    // 127.0.0.1 means "localhost only".
-    // Your machine can access it, but other machines cannot.
-    //
-    // 4000 is the port number.
-    //
-    // Full local URL:
-    // http://127.0.0.1:4000
-    let address = SocketAddr::from(([127, 0, 0, 1], 4000));
+    // Choose where the server will listen based on APP_HOST and APP_PORT.
+    let address = config.server_addr()?;
 
     // Bind a TCP listener to the address.
     //

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["macros"] }
+tower-http = { version = "0.6", features = ["trace"] }
 
 # Async runtime
 # Note axum will not work without tokio
