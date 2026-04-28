@@ -1,0 +1,25 @@
+# Rust build output
+/target/
+
+# Local environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Local logs
+*.log
+server-smoke.out.log
+server-smoke.err.log
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# SQLx local/offline metadata, if generated later
+.sqlx/
