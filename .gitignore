@@ -23,3 +23,15 @@ Thumbs.db
 
 # SQLx local/offline metadata, if generated later
 .sqlx/
+
+# Anchor / Solana generated files
+**/.anchor/
+**/test-ledger/
+**/node_modules/
+
+# Nested Anchor/Rust build outputs
+**/target/
+
+# Solana private keys
+**/*-keypair.json
+**/id.json
