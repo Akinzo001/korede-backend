@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Optional, with defaults:
     // - APP_HOST defaults to 127.0.0.1
     // - APP_PORT defaults to 4000
-    // - SOLANA_RPC_URL defaults to Solana devnet
+    // - SUI_RPC_URL defaults to Sui testnet
     //
     // Optional API keys:
     // - PAYSTACK_SECRET_KEY

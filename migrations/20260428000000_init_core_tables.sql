@@ -96,7 +96,8 @@ CREATE TABLE medical_cases (
     -- Stored as TEXT for now and validated by Rust enums.
     status TEXT NOT NULL,
 
-    -- Optional Solana transaction/reference once blockchain recording exists.
+    -- Legacy Solana transaction/reference.
+    -- New code should use generic blockchain_* columns added by later migrations.
     solana_reference TEXT,
 
     -- Timestamp when the row was created.

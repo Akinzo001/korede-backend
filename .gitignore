@@ -38,3 +38,8 @@ Thumbs.db
 # Solana private keys
 **/*-keypair.json
 **/id.json
+
+# Sui / Move generated files
+**/build/
+**/.sui/
+**/Move.lock

@@ -70,8 +70,16 @@ pub struct MedicalCase {
     // Current lifecycle status.
     pub status: MedicalCaseStatus,
 
-    // Optional Solana transaction/reference once blockchain recording exists.
-    pub solana_reference: Option<String>,
+    // Optional blockchain network where this case was recorded.
+    //
+    // Example: "sui_testnet".
+    pub blockchain_network: Option<String>,
+
+    // Optional blockchain transaction digest/hash.
+    pub blockchain_tx_digest: Option<String>,
+
+    // Optional blockchain record object/account ID.
+    pub blockchain_record_id: Option<String>,
 
     // When this case record was created.
     pub created_at: DateTime<Utc>,

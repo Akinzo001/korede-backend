@@ -1,4 +1,8 @@
-# Korede Donations Anchor Program
+# Deprecated: Korede Donations Anchor Program
+
+This Solana/Anchor project is kept temporarily for reference only.
+
+Korede is moving blockchain proof recording to Sui. New blockchain proof work should happen under `sui/korede_donations`.
 
 This Anchor project is intentionally separate from the Axum backend at the repo root.
 

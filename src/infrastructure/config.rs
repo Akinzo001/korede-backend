@@ -23,8 +23,8 @@ pub struct AppConfig {
     // Authentication-related settings, like JWT secret.
     pub auth: AuthConfig,
 
-    // Solana-related settings, like RPC URL.
-    pub solana: SolanaConfig,
+    // Sui-related settings, like RPC URL and package ID.
+    pub sui: SuiConfig,
 
     // Payment provider settings, like Paystack or Flutterwave keys.
     pub payments: PaymentConfig,
@@ -110,13 +110,26 @@ pub struct R2Config {
     pub region: String,
 }
 
-// Settings for Solana.
+// Settings for Sui.
 #[derive(Debug, Clone)]
-pub struct SolanaConfig {
-    // The RPC endpoint the backend will use when talking to Solana.
-    //
-    // For early development we default to devnet.
+pub struct SuiConfig {
+    // Sui network label.
+    pub network: String,
+
+    // The RPC endpoint the backend will use when talking to Sui.
     pub rpc_url: String,
+
+    // Published Sui package ID.
+    pub package_id: Option<String>,
+
+    // Platform/admin Sui address.
+    pub admin_address: Option<String>,
+
+    // Path to Sui keystore for future backend transaction signing.
+    pub keystore_path: Option<String>,
+
+    // Default gas budget for future Sui transactions.
+    pub gas_budget: u64,
 }
 
 // Settings for payment providers.
@@ -228,14 +241,22 @@ impl AppConfig {
                     })?,
             },
 
-            // Build the nested Solana config.
-            solana: SolanaConfig {
-                // SOLANA_RPC_URL is optional for now.
-                //
-                // If it is missing, we use Solana devnet so development
-                // does not accidentally point at mainnet.
-                rpc_url: optional_env("SOLANA_RPC_URL")
-                    .unwrap_or_else(|| "https://api.devnet.solana.com".to_owned()),
+            // Build the nested Sui config.
+            sui: SuiConfig {
+                network: optional_env("SUI_NETWORK").unwrap_or_else(|| "testnet".to_owned()),
+                rpc_url: optional_env("SUI_RPC_URL")
+                    .unwrap_or_else(|| "https://fullnode.testnet.sui.io:443".to_owned()),
+                package_id: optional_env("SUI_PACKAGE_ID"),
+                admin_address: optional_env("SUI_ADMIN_ADDRESS"),
+                keystore_path: optional_env("SUI_KEYSTORE_PATH"),
+                gas_budget: optional_env("SUI_GAS_BUDGET")
+                    .unwrap_or_else(|| "10000000".to_owned())
+                    .parse()
+                    .map_err(|_| ConfigError::InvalidNumber {
+                        key: "SUI_GAS_BUDGET",
+                        value: optional_env("SUI_GAS_BUDGET")
+                            .unwrap_or_else(|| "10000000".to_owned()),
+                    })?,
             },
 
             // Build the nested payment config.
