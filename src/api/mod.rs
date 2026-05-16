@@ -1,12 +1,17 @@
 // Expose the API documentation module.
+pub mod auth;
 pub mod docs;
+pub mod error;
 
 // Expose the health-check routes module.
 pub mod health;
+pub mod hospitals;
 
 // `Router` is Axum's route collection type.
 // `routing::get` is a helper for registering GET endpoints.
-use axum::{Router, routing::get};
+use std::sync::Arc;
+
+use axum::{Router, extract::DefaultBodyLimit, routing::get};
 
 // `PgPool` is SQLx's PostgreSQL connection pool type.
 use sqlx::PgPool;
@@ -20,6 +25,12 @@ use utoipa::OpenApi;
 // `SwaggerUi` serves browser-based API documentation.
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::port::{
+    auth::{PasswordHasher, TokenService},
+    hospital::HospitalRepository,
+    storage::DocumentStorage,
+};
+
 // `AppState` is data shared with all Axum route handlers.
 //
 // `Clone` is required because Axum clones state internally when routing requests.
@@ -29,6 +40,13 @@ pub struct AppState {
     //
     // Handlers can use this to query the database.
     pub db_pool: PgPool,
+
+    pub hospital_repository: Arc<dyn HospitalRepository>,
+    pub password_hasher: Arc<dyn PasswordHasher>,
+    pub token_service: Arc<dyn TokenService>,
+    pub document_storage: Arc<dyn DocumentStorage>,
+    pub jwt_expires_in_seconds: i64,
+    pub max_upload_bytes: usize,
 }
 
 // Build the full Axum application router.
@@ -45,6 +63,8 @@ pub fn app(state: AppState) -> Router {
         .route("/health", get(health::health_check))
         // Register GET /health/db.
         .route("/health/db", get(health::database_health_check))
+        .nest("/api/v1/hospitals", hospitals::routes())
+        .layer(DefaultBodyLimit::max(state.max_upload_bytes))
         // Add request/response tracing for all routes registered above.
         .layer(TraceLayer::new_for_http())
         // Attach shared application state to the router.

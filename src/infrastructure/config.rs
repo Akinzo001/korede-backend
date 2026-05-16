@@ -28,6 +28,9 @@ pub struct AppConfig {
 
     // Payment provider settings, like Paystack or Flutterwave keys.
     pub payments: PaymentConfig,
+
+    // Upload/storage settings for KYC documents.
+    pub storage: StorageConfig,
 }
 
 // Settings for the HTTP server.
@@ -62,6 +65,49 @@ pub struct AuthConfig {
     //
     // This must be private in production.
     pub jwt_secret: String,
+
+    // Number of seconds before issued JWTs expire.
+    pub jwt_expires_in_seconds: i64,
+}
+
+// Settings for document storage.
+#[derive(Debug, Clone)]
+pub struct StorageConfig {
+    // Storage provider selected for uploads.
+    //
+    // This phase implements local storage. S3 can be added later.
+    pub provider: String,
+
+    // Local directory where uploaded documents are stored.
+    pub local_root: String,
+
+    // Maximum accepted upload size in bytes.
+    pub max_upload_bytes: usize,
+
+    // Cloudflare R2 settings for the future R2 storage adapter.
+    pub r2: R2Config,
+}
+
+// Settings for Cloudflare R2 object storage.
+#[derive(Debug, Clone)]
+pub struct R2Config {
+    // R2 bucket where KYC documents will be stored.
+    pub bucket: Option<String>,
+
+    // S3-compatible R2 endpoint.
+    //
+    // Example:
+    // https://your-account-id.r2.cloudflarestorage.com
+    pub endpoint: Option<String>,
+
+    // R2 access key ID.
+    pub access_key_id: Option<String>,
+
+    // R2 secret access key.
+    pub secret_access_key: Option<String>,
+
+    // R2 S3-compatible region. Cloudflare normally uses "auto".
+    pub region: String,
 }
 
 // Settings for Solana.
@@ -107,6 +153,14 @@ pub enum ConfigError {
     // This error is used when APP_HOST + APP_PORT cannot become a SocketAddr.
     #[error("APP_HOST and APP_PORT must form a valid socket address, got: {0}")]
     InvalidSocketAddress(String),
+
+    // This error is used when a numeric environment variable is invalid.
+    #[error("{key} must be a valid number, got: {value}")]
+    InvalidNumber { key: &'static str, value: String },
+
+    // This error is used when STORAGE_PROVIDER is unknown.
+    #[error("unsupported storage provider: {0}")]
+    UnsupportedStorageProvider(String),
 }
 
 // `impl AppConfig` means:
@@ -164,6 +218,14 @@ impl AppConfig {
             auth: AuthConfig {
                 // JWT_SECRET is required because auth will need it later.
                 jwt_secret: required_env("JWT_SECRET")?,
+                jwt_expires_in_seconds: optional_env("JWT_EXPIRES_IN_SECONDS")
+                    .unwrap_or_else(|| "86400".to_owned())
+                    .parse()
+                    .map_err(|_| ConfigError::InvalidNumber {
+                        key: "JWT_EXPIRES_IN_SECONDS",
+                        value: optional_env("JWT_EXPIRES_IN_SECONDS")
+                            .unwrap_or_else(|| "86400".to_owned()),
+                    })?,
             },
 
             // Build the nested Solana config.
@@ -181,6 +243,36 @@ impl AppConfig {
                 // These are optional because payment integration is not built yet.
                 paystack_secret_key: optional_env("PAYSTACK_SECRET_KEY"),
                 flutterwave_secret_key: optional_env("FLUTTERWAVE_SECRET_KEY"),
+            },
+
+            storage: {
+                let provider =
+                    optional_env("STORAGE_PROVIDER").unwrap_or_else(|| "local".to_owned());
+
+                if provider != "local" && provider != "r2" {
+                    return Err(ConfigError::UnsupportedStorageProvider(provider));
+                }
+
+                StorageConfig {
+                    provider,
+                    local_root: optional_env("LOCAL_STORAGE_ROOT")
+                        .unwrap_or_else(|| "storage".to_owned()),
+                    max_upload_bytes: optional_env("MAX_UPLOAD_BYTES")
+                        .unwrap_or_else(|| "10485760".to_owned())
+                        .parse()
+                        .map_err(|_| ConfigError::InvalidNumber {
+                            key: "MAX_UPLOAD_BYTES",
+                            value: optional_env("MAX_UPLOAD_BYTES")
+                                .unwrap_or_else(|| "10485760".to_owned()),
+                        })?,
+                    r2: R2Config {
+                        bucket: optional_env("R2_BUCKET"),
+                        endpoint: optional_env("R2_ENDPOINT"),
+                        access_key_id: optional_env("R2_ACCESS_KEY_ID"),
+                        secret_access_key: optional_env("R2_SECRET_ACCESS_KEY"),
+                        region: optional_env("R2_REGION").unwrap_or_else(|| "auto".to_owned()),
+                    },
+                }
             },
         })
     }

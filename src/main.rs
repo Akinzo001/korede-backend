@@ -8,7 +8,14 @@
 use korede_backend::{
     // `connect` creates a PostgreSQL connection pool.
     // `run_migrations` applies SQL files from the `migrations/` folder.
-    adapters::db::postgres::{connect, run_migrations},
+    adapters::{
+        auth::{Argon2PasswordHasher, JwtTokenService},
+        db::{
+            hospital_repository::PostgresHospitalRepository,
+            postgres::{connect, run_migrations},
+        },
+        storage::{LocalDocumentStorage, R2DocumentStorage},
+    },
 
     // `AppState` is shared application state.
     // Right now it contains the database pool.
@@ -24,6 +31,7 @@ use korede_backend::{
     // `init_tracing` configures logging/tracing for the whole app.
     infrastructure::{config::AppConfig, logging::init_tracing},
 };
+use std::sync::Arc;
 
 // Rust's normal `main` function cannot use `.await` by itself.
 //
@@ -100,7 +108,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Important Rust detail:
     // This moves ownership of `db_pool` into `AppState`.
     // That is fine because from this point onward the router owns the state.
-    let state = AppState { db_pool };
+    let hospital_repository = Arc::new(PostgresHospitalRepository::new(db_pool.clone()));
+    let password_hasher = Arc::new(Argon2PasswordHasher);
+    let token_service = Arc::new(JwtTokenService::new(
+        config.auth.jwt_secret.clone(),
+        config.auth.jwt_expires_in_seconds,
+    ));
+    let document_storage = match config.storage.provider.as_str() {
+        "r2" => Arc::new(R2DocumentStorage::from_config(&config.storage.r2)?)
+            as Arc<dyn korede_backend::port::storage::DocumentStorage>,
+        _ => Arc::new(LocalDocumentStorage::new(config.storage.local_root.clone()))
+            as Arc<dyn korede_backend::port::storage::DocumentStorage>,
+    };
+
+    let state = AppState {
+        db_pool,
+        hospital_repository,
+        password_hasher,
+        token_service,
+        document_storage,
+        jwt_expires_in_seconds: config.auth.jwt_expires_in_seconds,
+        max_upload_bytes: config.storage.max_upload_bytes,
+    };
 
     // Build the Axum router.
     //

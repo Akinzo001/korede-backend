@@ -44,6 +44,17 @@ pub struct Hospital {
     // Public hospital name.
     pub name: String,
 
+    // Login email for the hospital account.
+    pub email: String,
+
+    // Hashed password used for authentication.
+    //
+    // This must never contain the raw password.
+    pub password_hash: String,
+
+    // Optional hospital phone number.
+    pub phone_number: Option<String>,
+
     // Optional CAC registration number.
     //
     // `Option<String>` means the value can be present or missing.

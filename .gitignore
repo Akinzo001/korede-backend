@@ -24,6 +24,9 @@ Thumbs.db
 # SQLx local/offline metadata, if generated later
 .sqlx/
 
+# Local uploaded files
+/storage/
+
 # Anchor / Solana generated files
 **/.anchor/
 **/test-ledger/

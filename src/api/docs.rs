@@ -4,7 +4,14 @@
 use utoipa::OpenApi;
 
 // These response structs are included as schemas in the generated API docs.
-use crate::api::health::{DatabaseHealthResponse, HealthResponse};
+use crate::api::{
+    health::{DatabaseHealthResponse, HealthResponse},
+    hospitals::{
+        HospitalDocumentResponse, HospitalDocumentsResponse, HospitalResponse,
+        HospitalSummaryResponse, LoginHospitalRequest, LoginHospitalResponse,
+        RegisterHospitalRequest,
+    },
+};
 
 // Generate an OpenAPI document for the backend.
 //
@@ -20,18 +27,54 @@ use crate::api::health::{DatabaseHealthResponse, HealthResponse};
     // List every handler function that should appear in the docs.
     paths(
         crate::api::health::health_check,
-        crate::api::health::database_health_check
+        crate::api::health::database_health_check,
+        crate::api::hospitals::register_hospital,
+        crate::api::hospitals::login_hospital,
+        crate::api::hospitals::current_hospital,
+        crate::api::hospitals::upload_cac_document,
+        crate::api::hospitals::upload_license_document,
+        crate::api::hospitals::list_documents
     ),
     // List every response/request type that should appear as a schema.
     components(
-        schemas(HealthResponse, DatabaseHealthResponse)
+        schemas(
+            HealthResponse,
+            DatabaseHealthResponse,
+            RegisterHospitalRequest,
+            HospitalResponse,
+            LoginHospitalRequest,
+            LoginHospitalResponse,
+            HospitalSummaryResponse,
+            HospitalDocumentResponse,
+            HospitalDocumentsResponse
+        )
     ),
+    modifiers(&SecurityAddon),
     // Group endpoints into named sections in Swagger UI.
     tags(
-        (name = "Health", description = "Endpoints for checking whether the API and database are working.")
+        (name = "Health", description = "Endpoints for checking whether the API and database are working."),
+        (name = "Hospitals", description = "Hospital registration, authentication, and KYC endpoints.")
     )
 )]
 // Empty struct used only as a type that owns the generated OpenAPI document.
 //
 // You call `ApiDoc::openapi()` in `api/mod.rs`.
 pub struct ApiDoc;
+
+pub struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            let mut bearer = utoipa::openapi::security::Http::new(
+                utoipa::openapi::security::HttpAuthScheme::Bearer,
+            );
+            bearer.bearer_format = Some("JWT".to_owned());
+
+            components.add_security_scheme(
+                "bearer_auth",
+                utoipa::openapi::security::SecurityScheme::Http(bearer),
+            );
+        }
+    }
+}
