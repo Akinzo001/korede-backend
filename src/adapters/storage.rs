@@ -172,8 +172,6 @@ where
 fn extension_for(mime_type: &str, original_filename: &str) -> String {
     match mime_type {
         "application/pdf" => "pdf".to_owned(),
-        "image/jpeg" => "jpg".to_owned(),
-        "image/png" => "png".to_owned(),
         _ => original_filename
             .rsplit('.')
             .next()

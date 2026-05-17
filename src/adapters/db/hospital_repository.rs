@@ -42,6 +42,8 @@ impl HospitalRepository for PostgresHospitalRepository {
                 email,
                 password_hash,
                 phone_number,
+                official_address,
+                administrator_name,
                 cac_registration_number,
                 medical_license_number,
                 corporate_account_name,
@@ -51,13 +53,15 @@ impl HospitalRepository for PostgresHospitalRepository {
                 created_at,
                 updated_at
             )
-            VALUES ($1, $2, LOWER($3), $4, $5, $6, $7, $8, $9, $10, 'pending', NOW(), NOW())
+            VALUES ($1, $2, LOWER($3), $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending', NOW(), NOW())
             RETURNING
                 id,
                 name,
                 email,
                 password_hash,
                 phone_number,
+                official_address,
+                administrator_name,
                 cac_registration_number,
                 medical_license_number,
                 corporate_account_name,
@@ -73,6 +77,8 @@ impl HospitalRepository for PostgresHospitalRepository {
         .bind(hospital.email)
         .bind(hospital.password_hash)
         .bind(hospital.phone_number)
+        .bind(hospital.official_address)
+        .bind(hospital.administrator_name)
         .bind(hospital.cac_registration_number)
         .bind(hospital.medical_license_number)
         .bind(hospital.corporate_account_name)
@@ -102,6 +108,8 @@ impl HospitalRepository for PostgresHospitalRepository {
                 email,
                 password_hash,
                 phone_number,
+                official_address,
+                administrator_name,
                 cac_registration_number,
                 medical_license_number,
                 corporate_account_name,
@@ -135,6 +143,8 @@ impl HospitalRepository for PostgresHospitalRepository {
                 email,
                 password_hash,
                 phone_number,
+                official_address,
+                administrator_name,
                 cac_registration_number,
                 medical_license_number,
                 corporate_account_name,
@@ -246,6 +256,8 @@ fn hospital_from_row(row: &sqlx::postgres::PgRow) -> Result<Hospital, sqlx::Erro
         email: row.try_get("email")?,
         password_hash: row.try_get("password_hash")?,
         phone_number: row.try_get("phone_number")?,
+        official_address: row.try_get("official_address")?,
+        administrator_name: row.try_get("administrator_name")?,
         cac_registration_number: row.try_get("cac_registration_number")?,
         medical_license_number: row.try_get("medical_license_number")?,
         corporate_account_name: row.try_get("corporate_account_name")?,
@@ -300,6 +312,7 @@ fn document_status_from_str(value: &str) -> HospitalDocumentStatus {
 fn storage_provider_from_str(value: &str) -> StorageProvider {
     match value {
         "s3" => StorageProvider::S3,
+        "backblaze" => StorageProvider::Backblaze,
         _ => StorageProvider::Local,
     }
 }

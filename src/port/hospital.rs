@@ -13,6 +13,8 @@ pub struct NewHospital {
     pub email: String,
     pub password_hash: String,
     pub phone_number: Option<String>,
+    pub official_address: String,
+    pub administrator_name: String,
     pub cac_registration_number: Option<String>,
     pub medical_license_number: Option<String>,
     pub corporate_account_name: String,

@@ -1,8 +1,9 @@
 use axum::{
     Json, Router,
-    extract::{Multipart, State},
+    extract::State,
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -25,8 +26,6 @@ pub fn routes() -> Router<AppState> {
         .route("/register", post(register_hospital))
         .route("/login", post(login_hospital))
         .route("/me", get(current_hospital))
-        .route("/documents/cac", post(upload_cac_document))
-        .route("/documents/license", post(upload_license_document))
         .route("/documents", get(list_documents))
 }
 
@@ -36,11 +35,29 @@ pub struct RegisterHospitalRequest {
     pub email: String,
     pub password: String,
     pub phone_number: Option<String>,
+    pub official_address: String,
+    pub administrator_name: String,
     pub cac_registration_number: Option<String>,
     pub medical_license_number: Option<String>,
     pub corporate_account_name: String,
     pub corporate_account_number: String,
     pub bank_name: String,
+    pub terms_accepted: bool,
+    pub cac_document: Base64DocumentRequest,
+    pub medical_license_document: Base64DocumentRequest,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct Base64DocumentRequest {
+    pub original_filename: String,
+    pub mime_type: String,
+    pub content_base64: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RegisterHospitalResponse {
+    pub hospital: HospitalResponse,
+    pub documents: Vec<HospitalDocumentResponse>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -49,6 +66,8 @@ pub struct HospitalResponse {
     pub name: String,
     pub email: String,
     pub phone_number: Option<String>,
+    pub official_address: Option<String>,
+    pub administrator_name: Option<String>,
     pub cac_registration_number: Option<String>,
     pub medical_license_number: Option<String>,
     pub corporate_account_name: String,
@@ -104,16 +123,22 @@ pub struct HospitalDocumentsResponse {
     tag = "Hospitals",
     request_body = RegisterHospitalRequest,
     responses(
-        (status = 200, description = "Hospital registered successfully.", body = HospitalResponse),
+        (status = 200, description = "Hospital registered successfully with KYC documents.", body = RegisterHospitalResponse),
         (status = 400, description = "Invalid registration request."),
+        (status = 413, description = "Uploaded document is too large."),
+        (status = 415, description = "Unsupported document type."),
         (status = 409, description = "Hospital email already exists.")
     )
 )]
 pub async fn register_hospital(
     State(state): State<AppState>,
     Json(request): Json<RegisterHospitalRequest>,
-) -> Result<Json<HospitalResponse>, ApiError> {
+) -> Result<Json<RegisterHospitalResponse>, ApiError> {
     validate_registration(&request)?;
+
+    let cac_document = decode_base64_document(&request.cac_document, state.max_upload_bytes)?;
+    let medical_license_document =
+        decode_base64_document(&request.medical_license_document, state.max_upload_bytes)?;
 
     let password_hash = state
         .password_hasher
@@ -127,6 +152,8 @@ pub async fn register_hospital(
             email: request.email.trim().to_lowercase(),
             password_hash,
             phone_number: request.phone_number.map(|value| value.trim().to_owned()),
+            official_address: request.official_address.trim().to_owned(),
+            administrator_name: request.administrator_name.trim().to_owned(),
             cac_registration_number: request
                 .cac_registration_number
                 .map(|value| value.trim().to_owned()),
@@ -139,7 +166,31 @@ pub async fn register_hospital(
         })
         .await?;
 
-    Ok(Json(HospitalResponse::from(hospital)))
+    let cac_document = store_registration_document(
+        &state,
+        hospital.id,
+        HospitalDocumentType::CacCertificate,
+        &request.cac_document,
+        &cac_document,
+    )
+    .await?;
+
+    let medical_license_document = store_registration_document(
+        &state,
+        hospital.id,
+        HospitalDocumentType::MedicalLicense,
+        &request.medical_license_document,
+        &medical_license_document,
+    )
+    .await?;
+
+    Ok(Json(RegisterHospitalResponse {
+        hospital: HospitalResponse::from(hospital),
+        documents: vec![
+            HospitalDocumentResponse::from(cac_document),
+            HospitalDocumentResponse::from(medical_license_document),
+        ],
+    }))
 }
 
 #[utoipa::path(
@@ -208,58 +259,6 @@ pub async fn current_hospital(
 }
 
 #[utoipa::path(
-    post,
-    path = "/api/v1/hospitals/documents/cac",
-    tag = "Hospitals",
-    security(("bearer_auth" = [])),
-    responses(
-        (status = 200, description = "CAC document uploaded.", body = HospitalDocumentResponse),
-        (status = 401, description = "Missing or invalid bearer token."),
-        (status = 413, description = "Uploaded file is too large."),
-        (status = 415, description = "Unsupported file type.")
-    )
-)]
-pub async fn upload_cac_document(
-    authenticated: AuthenticatedHospital,
-    State(state): State<AppState>,
-    multipart: Multipart,
-) -> Result<Json<HospitalDocumentResponse>, ApiError> {
-    upload_document(
-        authenticated,
-        state,
-        multipart,
-        HospitalDocumentType::CacCertificate,
-    )
-    .await
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/v1/hospitals/documents/license",
-    tag = "Hospitals",
-    security(("bearer_auth" = [])),
-    responses(
-        (status = 200, description = "Medical license document uploaded.", body = HospitalDocumentResponse),
-        (status = 401, description = "Missing or invalid bearer token."),
-        (status = 413, description = "Uploaded file is too large."),
-        (status = 415, description = "Unsupported file type.")
-    )
-)]
-pub async fn upload_license_document(
-    authenticated: AuthenticatedHospital,
-    State(state): State<AppState>,
-    multipart: Multipart,
-) -> Result<Json<HospitalDocumentResponse>, ApiError> {
-    upload_document(
-        authenticated,
-        state,
-        multipart,
-        HospitalDocumentType::MedicalLicense,
-    )
-    .await
-}
-
-#[utoipa::path(
     get,
     path = "/api/v1/hospitals/documents",
     tag = "Hospitals",
@@ -284,86 +283,37 @@ pub async fn list_documents(
     Ok(Json(HospitalDocumentsResponse { documents }))
 }
 
-async fn upload_document(
-    authenticated: AuthenticatedHospital,
-    state: AppState,
-    mut multipart: Multipart,
-    document_type: HospitalDocumentType,
-) -> Result<Json<HospitalDocumentResponse>, ApiError> {
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| ApiError::BadRequest("invalid multipart form data".to_owned()))?
-    {
-        if field.name() != Some("file") {
-            continue;
-        }
-
-        let original_filename = field
-            .file_name()
-            .map(str::to_owned)
-            .unwrap_or_else(|| "document".to_owned());
-
-        let mime_type = field
-            .content_type()
-            .map(str::to_owned)
-            .unwrap_or_else(|| "application/octet-stream".to_owned());
-
-        validate_mime_type(&mime_type)?;
-
-        let contents = field
-            .bytes()
-            .await
-            .map_err(|_| ApiError::BadRequest("failed to read uploaded file".to_owned()))?;
-
-        if contents.len() > state.max_upload_bytes {
-            return Err(ApiError::PayloadTooLarge(
-                "uploaded file is too large".to_owned(),
-            ));
-        }
-
-        let stored = state
-            .document_storage
-            .save_document(
-                authenticated.hospital_id,
-                document_type.clone(),
-                &original_filename,
-                &mime_type,
-                &contents,
-            )
-            .await
-            .map_err(|_| ApiError::Internal("failed to store document".to_owned()))?;
-
-        let document = state
-            .hospital_repository
-            .save_hospital_document(NewHospitalDocument {
-                hospital_id: authenticated.hospital_id,
-                document_type,
-                storage_provider: stored.storage_provider,
-                storage_key: stored.storage_key,
-                original_filename: stored.original_filename,
-                mime_type: stored.mime_type,
-                file_size_bytes: stored.file_size_bytes,
-            })
-            .await?;
-
-        return Ok(Json(HospitalDocumentResponse::from(document)));
-    }
-
-    Err(ApiError::BadRequest(
-        "missing multipart file field".to_owned(),
-    ))
-}
-
 fn validate_registration(request: &RegisterHospitalRequest) -> Result<(), ApiError> {
     if request.name.trim().is_empty()
         || request.email.trim().is_empty()
+        || request.official_address.trim().is_empty()
+        || request.administrator_name.trim().is_empty()
         || request.corporate_account_name.trim().is_empty()
         || request.corporate_account_number.trim().is_empty()
         || request.bank_name.trim().is_empty()
+        || request.cac_document.original_filename.trim().is_empty()
+        || request.cac_document.mime_type.trim().is_empty()
+        || request.cac_document.content_base64.trim().is_empty()
+        || request
+            .medical_license_document
+            .original_filename
+            .trim()
+            .is_empty()
+        || request.medical_license_document.mime_type.trim().is_empty()
+        || request
+            .medical_license_document
+            .content_base64
+            .trim()
+            .is_empty()
     {
         return Err(ApiError::BadRequest(
             "required fields are missing".to_owned(),
+        ));
+    }
+
+    if !request.terms_accepted {
+        return Err(ApiError::BadRequest(
+            "terms must be accepted before registration".to_owned(),
         ));
     }
 
@@ -371,20 +321,86 @@ fn validate_registration(request: &RegisterHospitalRequest) -> Result<(), ApiErr
         return Err(ApiError::BadRequest("email is invalid".to_owned()));
     }
 
-    if request.password.len() < 8 {
+    if request.password.len() < 12 {
         return Err(ApiError::BadRequest(
-            "password must be at least 8 characters".to_owned(),
+            "password must be at least 12 characters".to_owned(),
         ));
     }
+
+    validate_mime_type(request.cac_document.mime_type.trim())?;
+    validate_mime_type(request.medical_license_document.mime_type.trim())?;
 
     Ok(())
 }
 
+fn decode_base64_document(
+    document: &Base64DocumentRequest,
+    max_upload_bytes: usize,
+) -> Result<Vec<u8>, ApiError> {
+    let encoded = document.content_base64.trim();
+    let encoded = encoded
+        .split_once(',')
+        .map(|(_, value)| value)
+        .unwrap_or(encoded);
+
+    let contents = general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| ApiError::BadRequest("document base64 is invalid".to_owned()))?;
+
+    if contents.is_empty() {
+        return Err(ApiError::BadRequest(
+            "document content cannot be empty".to_owned(),
+        ));
+    }
+
+    if contents.len() > max_upload_bytes {
+        return Err(ApiError::PayloadTooLarge(
+            "uploaded document is too large".to_owned(),
+        ));
+    }
+
+    Ok(contents)
+}
+
+async fn store_registration_document(
+    state: &AppState,
+    hospital_id: Uuid,
+    document_type: HospitalDocumentType,
+    request: &Base64DocumentRequest,
+    contents: &[u8],
+) -> Result<HospitalDocument, ApiError> {
+    let stored = state
+        .document_storage
+        .save_document(
+            hospital_id,
+            document_type.clone(),
+            request.original_filename.trim(),
+            request.mime_type.trim(),
+            contents,
+        )
+        .await
+        .map_err(|_| ApiError::Internal("failed to store document".to_owned()))?;
+
+    state
+        .hospital_repository
+        .save_hospital_document(NewHospitalDocument {
+            hospital_id,
+            document_type,
+            storage_provider: stored.storage_provider,
+            storage_key: stored.storage_key,
+            original_filename: stored.original_filename,
+            mime_type: stored.mime_type,
+            file_size_bytes: stored.file_size_bytes,
+        })
+        .await
+        .map_err(ApiError::from)
+}
+
 fn validate_mime_type(mime_type: &str) -> Result<(), ApiError> {
     match mime_type {
-        "application/pdf" | "image/jpeg" | "image/png" => Ok(()),
+        "application/pdf" => Ok(()),
         _ => Err(ApiError::UnsupportedMediaType(
-            "only PDF, JPEG, and PNG files are supported".to_owned(),
+            "only PDF files are supported".to_owned(),
         )),
     }
 }
@@ -400,6 +416,8 @@ impl From<Hospital> for HospitalResponse {
             name: hospital.name,
             email: hospital.email,
             phone_number: hospital.phone_number,
+            official_address: hospital.official_address,
+            administrator_name: hospital.administrator_name,
             cac_registration_number: hospital.cac_registration_number,
             medical_license_number: hospital.medical_license_number,
             corporate_account_name: hospital.corporate_account_name,
@@ -448,11 +466,24 @@ mod tests {
             email: "admin@lagoon.example".to_owned(),
             password: "strong-password".to_owned(),
             phone_number: Some("+2348012345678".to_owned()),
+            official_address: "1 Hospital Road, Lagos".to_owned(),
+            administrator_name: "Dr Jane Doe".to_owned(),
             cac_registration_number: Some("RC123456".to_owned()),
             medical_license_number: Some("ML123456".to_owned()),
             corporate_account_name: "Lagoon Hospital Ltd".to_owned(),
             corporate_account_number: "0123456789".to_owned(),
             bank_name: "Wema Bank".to_owned(),
+            terms_accepted: true,
+            cac_document: Base64DocumentRequest {
+                original_filename: "cac.pdf".to_owned(),
+                mime_type: "application/pdf".to_owned(),
+                content_base64: "aGVsbG8=".to_owned(),
+            },
+            medical_license_document: Base64DocumentRequest {
+                original_filename: "license.pdf".to_owned(),
+                mime_type: "application/pdf".to_owned(),
+                content_base64: "aGVsbG8=".to_owned(),
+            },
         }
     }
 
@@ -484,14 +515,53 @@ mod tests {
     }
 
     #[test]
-    fn mime_validation_accepts_supported_types() {
+    fn registration_validation_rejects_missing_terms_acceptance() {
+        let mut request = valid_registration_request();
+        request.terms_accepted = false;
+
+        assert!(matches!(
+            validate_registration(&request),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn base64_document_decoding_accepts_plain_base64() {
+        let request = Base64DocumentRequest {
+            original_filename: "cac.pdf".to_owned(),
+            mime_type: "application/pdf".to_owned(),
+            content_base64: "aGVsbG8=".to_owned(),
+        };
+
+        assert_eq!(decode_base64_document(&request, 10).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn base64_document_decoding_accepts_data_urls() {
+        let request = Base64DocumentRequest {
+            original_filename: "cac.pdf".to_owned(),
+            mime_type: "application/pdf".to_owned(),
+            content_base64: "data:application/pdf;base64,aGVsbG8=".to_owned(),
+        };
+
+        assert_eq!(decode_base64_document(&request, 10).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn mime_validation_accepts_pdf() {
         assert!(validate_mime_type("application/pdf").is_ok());
-        assert!(validate_mime_type("image/jpeg").is_ok());
-        assert!(validate_mime_type("image/png").is_ok());
     }
 
     #[test]
     fn mime_validation_rejects_unsupported_types() {
+        assert!(matches!(
+            validate_mime_type("image/jpeg"),
+            Err(ApiError::UnsupportedMediaType(_))
+        ));
+        assert!(matches!(
+            validate_mime_type("image/png"),
+            Err(ApiError::UnsupportedMediaType(_))
+        ));
         assert!(matches!(
             validate_mime_type("text/plain"),
             Err(ApiError::UnsupportedMediaType(_))

@@ -55,6 +55,12 @@ pub struct Hospital {
     // Optional hospital phone number.
     pub phone_number: Option<String>,
 
+    // Physical address of the hospital.
+    pub official_address: Option<String>,
+
+    // Name of the administrator who registered the hospital account.
+    pub administrator_name: Option<String>,
+
     // Optional CAC registration number.
     //
     // `Option<String>` means the value can be present or missing.

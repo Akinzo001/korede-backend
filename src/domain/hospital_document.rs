@@ -41,6 +41,7 @@ impl HospitalDocumentStatus {
 pub enum StorageProvider {
     Local,
     S3,
+    Backblaze,
 }
 
 impl StorageProvider {
@@ -48,6 +49,7 @@ impl StorageProvider {
         match self {
             Self::Local => "local",
             Self::S3 => "s3",
+            Self::Backblaze => "backblaze",
         }
     }
 }

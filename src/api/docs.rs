@@ -7,9 +7,9 @@ use utoipa::OpenApi;
 use crate::api::{
     health::{DatabaseHealthResponse, HealthResponse},
     hospitals::{
-        HospitalDocumentResponse, HospitalDocumentsResponse, HospitalResponse,
-        HospitalSummaryResponse, LoginHospitalRequest, LoginHospitalResponse,
-        RegisterHospitalRequest,
+        Base64DocumentRequest, HospitalDocumentResponse, HospitalDocumentsResponse,
+        HospitalResponse, HospitalSummaryResponse, LoginHospitalRequest, LoginHospitalResponse,
+        RegisterHospitalRequest, RegisterHospitalResponse,
     },
 };
 
@@ -31,8 +31,6 @@ use crate::api::{
         crate::api::hospitals::register_hospital,
         crate::api::hospitals::login_hospital,
         crate::api::hospitals::current_hospital,
-        crate::api::hospitals::upload_cac_document,
-        crate::api::hospitals::upload_license_document,
         crate::api::hospitals::list_documents
     ),
     // List every response/request type that should appear as a schema.
@@ -40,7 +38,9 @@ use crate::api::{
         schemas(
             HealthResponse,
             DatabaseHealthResponse,
+            Base64DocumentRequest,
             RegisterHospitalRequest,
+            RegisterHospitalResponse,
             HospitalResponse,
             LoginHospitalRequest,
             LoginHospitalResponse,
