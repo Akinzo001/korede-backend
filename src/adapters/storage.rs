@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     domain::hospital_document::HospitalDocumentType,
-    infrastructure::config::R2Config,
+    infrastructure::config::BackblazeConfig,
     port::storage::{DocumentStorage, DocumentStorageError, StoredDocument},
 };
 
@@ -21,7 +21,7 @@ pub struct LocalDocumentStorage {
 }
 
 #[derive(Debug, Clone)]
-pub struct R2DocumentStorage {
+pub struct BackblazeDocumentStorage {
     client: S3Client,
     bucket: String,
 }
@@ -32,32 +32,33 @@ impl LocalDocumentStorage {
     }
 }
 
-impl R2DocumentStorage {
-    pub fn from_config(config: &R2Config) -> Result<Self, DocumentStorageError> {
+impl BackblazeDocumentStorage {
+    pub fn from_config(config: &BackblazeConfig) -> Result<Self, DocumentStorageError> {
         let bucket = config
             .bucket
             .clone()
-            .ok_or(DocumentStorageError::MissingConfig("R2_BUCKET"))?;
+            .ok_or(DocumentStorageError::MissingConfig("BACKBLAZE_BUCKET"))?;
         let endpoint = config
             .endpoint
             .clone()
-            .ok_or(DocumentStorageError::MissingConfig("R2_ENDPOINT"))?;
-        let access_key_id = config
-            .access_key_id
-            .clone()
-            .ok_or(DocumentStorageError::MissingConfig("R2_ACCESS_KEY_ID"))?;
-        let secret_access_key = config
-            .secret_access_key
-            .clone()
-            .ok_or(DocumentStorageError::MissingConfig("R2_SECRET_ACCESS_KEY"))?;
+            .ok_or(DocumentStorageError::MissingConfig("BACKBLAZE_ENDPOINT"))?;
+        let access_key_id =
+            config
+                .access_key_id
+                .clone()
+                .ok_or(DocumentStorageError::MissingConfig(
+                    "BACKBLAZE_ACCESS_KEY_ID",
+                ))?;
+        let secret_access_key =
+            config
+                .secret_access_key
+                .clone()
+                .ok_or(DocumentStorageError::MissingConfig(
+                    "BACKBLAZE_SECRET_ACCESS_KEY",
+                ))?;
 
-        let credentials = Credentials::new(
-            access_key_id,
-            secret_access_key,
-            None,
-            None,
-            "cloudflare-r2",
-        );
+        let credentials =
+            Credentials::new(access_key_id, secret_access_key, None, None, "backblaze-b2");
 
         let sdk_config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::latest())
@@ -118,7 +119,7 @@ impl DocumentStorage for LocalDocumentStorage {
 }
 
 #[async_trait]
-impl DocumentStorage for R2DocumentStorage {
+impl DocumentStorage for BackblazeDocumentStorage {
     async fn save_document(
         &self,
         hospital_id: Uuid,
@@ -146,12 +147,12 @@ impl DocumentStorage for R2DocumentStorage {
             .send()
             .await
             .map_err(|error| {
-                log_r2_error(error);
+                log_backblaze_error(error);
                 DocumentStorageError::StoreFailed
             })?;
 
         Ok(StoredDocument {
-            storage_provider: "r2".to_owned(),
+            storage_provider: "backblaze".to_owned(),
             storage_key,
             original_filename: safe_original_filename,
             mime_type: mime_type.to_owned(),
@@ -160,12 +161,12 @@ impl DocumentStorage for R2DocumentStorage {
     }
 }
 
-fn log_r2_error<E, R>(error: SdkError<E, R>)
+fn log_backblaze_error<E, R>(error: SdkError<E, R>)
 where
     E: std::fmt::Debug,
     R: std::fmt::Debug,
 {
-    tracing::error!(?error, "failed to upload document to Cloudflare R2");
+    tracing::error!(?error, "failed to upload document to Backblaze B2");
 }
 
 fn extension_for(mime_type: &str, original_filename: &str) -> String {

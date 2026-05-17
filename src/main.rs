@@ -14,7 +14,7 @@ use korede_backend::{
             hospital_repository::PostgresHospitalRepository,
             postgres::{connect, run_migrations},
         },
-        storage::{LocalDocumentStorage, R2DocumentStorage},
+        storage::{BackblazeDocumentStorage, LocalDocumentStorage},
     },
 
     // `AppState` is shared application state.
@@ -115,8 +115,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.auth.jwt_expires_in_seconds,
     ));
     let document_storage = match config.storage.provider.as_str() {
-        "r2" => Arc::new(R2DocumentStorage::from_config(&config.storage.r2)?)
-            as Arc<dyn korede_backend::port::storage::DocumentStorage>,
+        "backblaze" => Arc::new(BackblazeDocumentStorage::from_config(
+            &config.storage.backblaze,
+        )?) as Arc<dyn korede_backend::port::storage::DocumentStorage>,
         _ => Arc::new(LocalDocumentStorage::new(config.storage.local_root.clone()))
             as Arc<dyn korede_backend::port::storage::DocumentStorage>,
     };

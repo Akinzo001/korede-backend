@@ -84,29 +84,29 @@ pub struct StorageConfig {
     // Maximum accepted upload size in bytes.
     pub max_upload_bytes: usize,
 
-    // Cloudflare R2 settings for the future R2 storage adapter.
-    pub r2: R2Config,
+    // Backblaze B2 settings for the S3-compatible storage adapter.
+    pub backblaze: BackblazeConfig,
 }
 
-// Settings for Cloudflare R2 object storage.
+// Settings for Backblaze B2 S3-compatible object storage.
 #[derive(Debug, Clone)]
-pub struct R2Config {
-    // R2 bucket where KYC documents will be stored.
+pub struct BackblazeConfig {
+    // Backblaze bucket where KYC documents will be stored.
     pub bucket: Option<String>,
 
-    // S3-compatible R2 endpoint.
+    // S3-compatible Backblaze endpoint.
     //
     // Example:
-    // https://your-account-id.r2.cloudflarestorage.com
+    // https://s3.eu-central-003.backblazeb2.com
     pub endpoint: Option<String>,
 
-    // R2 access key ID.
+    // Backblaze application key ID.
     pub access_key_id: Option<String>,
 
-    // R2 secret access key.
+    // Backblaze application key.
     pub secret_access_key: Option<String>,
 
-    // R2 S3-compatible region. Cloudflare normally uses "auto".
+    // Backblaze S3-compatible region.
     pub region: String,
 }
 
@@ -270,7 +270,7 @@ impl AppConfig {
                 let provider =
                     optional_env("STORAGE_PROVIDER").unwrap_or_else(|| "local".to_owned());
 
-                if provider != "local" && provider != "r2" {
+                if provider != "local" && provider != "backblaze" {
                     return Err(ConfigError::UnsupportedStorageProvider(provider));
                 }
 
@@ -286,12 +286,13 @@ impl AppConfig {
                             value: optional_env("MAX_UPLOAD_BYTES")
                                 .unwrap_or_else(|| "10485760".to_owned()),
                         })?,
-                    r2: R2Config {
-                        bucket: optional_env("R2_BUCKET"),
-                        endpoint: optional_env("R2_ENDPOINT"),
-                        access_key_id: optional_env("R2_ACCESS_KEY_ID"),
-                        secret_access_key: optional_env("R2_SECRET_ACCESS_KEY"),
-                        region: optional_env("R2_REGION").unwrap_or_else(|| "auto".to_owned()),
+                    backblaze: BackblazeConfig {
+                        bucket: optional_env("BACKBLAZE_BUCKET"),
+                        endpoint: optional_env("BACKBLAZE_ENDPOINT"),
+                        access_key_id: optional_env("BACKBLAZE_ACCESS_KEY_ID"),
+                        secret_access_key: optional_env("BACKBLAZE_SECRET_ACCESS_KEY"),
+                        region: optional_env("BACKBLAZE_REGION")
+                            .unwrap_or_else(|| "eu-central-003".to_owned()),
                     },
                 }
             },
