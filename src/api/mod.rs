@@ -27,6 +27,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::port::{
     auth::{PasswordHasher, TokenService},
+    email::EmailService,
     hospital::HospitalRepository,
     storage::DocumentStorage,
 };
@@ -45,6 +46,7 @@ pub struct AppState {
     pub password_hasher: Arc<dyn PasswordHasher>,
     pub token_service: Arc<dyn TokenService>,
     pub document_storage: Arc<dyn DocumentStorage>,
+    pub email_service: Arc<dyn EmailService>,
     pub jwt_expires_in_seconds: i64,
     pub max_upload_bytes: usize,
 }

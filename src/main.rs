@@ -14,6 +14,7 @@ use korede_backend::{
             hospital_repository::PostgresHospitalRepository,
             postgres::{connect, run_migrations},
         },
+        email::{BrevoEmailService, DisabledEmailService},
         storage::{BackblazeDocumentStorage, LocalDocumentStorage},
     },
 
@@ -121,6 +122,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => Arc::new(LocalDocumentStorage::new(config.storage.local_root.clone()))
             as Arc<dyn korede_backend::port::storage::DocumentStorage>,
     };
+    let email_service = match config.email.provider.as_str() {
+        "brevo" => Arc::new(BrevoEmailService::from_config(
+            &config.email,
+            &config.email.brevo,
+        )?) as Arc<dyn korede_backend::port::email::EmailService>,
+        _ => Arc::new(DisabledEmailService) as Arc<dyn korede_backend::port::email::EmailService>,
+    };
 
     let state = AppState {
         db_pool,
@@ -128,6 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         password_hasher,
         token_service,
         document_storage,
+        email_service,
         jwt_expires_in_seconds: config.auth.jwt_expires_in_seconds,
         max_upload_bytes: config.storage.max_upload_bytes,
     };

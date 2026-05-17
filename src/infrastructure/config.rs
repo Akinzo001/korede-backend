@@ -31,6 +31,9 @@ pub struct AppConfig {
 
     // Upload/storage settings for KYC documents.
     pub storage: StorageConfig,
+
+    // Email settings for transactional notifications.
+    pub email: EmailConfig,
 }
 
 // Settings for the HTTP server.
@@ -110,6 +113,33 @@ pub struct BackblazeConfig {
     pub region: String,
 }
 
+// Settings for outbound transactional email.
+#[derive(Debug, Clone)]
+pub struct EmailConfig {
+    // Email provider selected at runtime.
+    //
+    // Supported values:
+    // - disabled
+    // - brevo
+    pub provider: String,
+
+    // Email address used as the sender.
+    pub from_email: Option<String>,
+
+    // Display name used as the sender.
+    pub from_name: Option<String>,
+
+    // Brevo-specific settings.
+    pub brevo: BrevoConfig,
+}
+
+// Settings for Brevo's transactional email API.
+#[derive(Debug, Clone)]
+pub struct BrevoConfig {
+    // Brevo SMTP/API key.
+    pub api_key: Option<String>,
+}
+
 // Settings for Sui.
 #[derive(Debug, Clone)]
 pub struct SuiConfig {
@@ -174,6 +204,10 @@ pub enum ConfigError {
     // This error is used when STORAGE_PROVIDER is unknown.
     #[error("unsupported storage provider: {0}")]
     UnsupportedStorageProvider(String),
+
+    // This error is used when EMAIL_PROVIDER is unknown.
+    #[error("unsupported email provider: {0}")]
+    UnsupportedEmailProvider(String),
 }
 
 // `impl AppConfig` means:
@@ -293,6 +327,24 @@ impl AppConfig {
                         secret_access_key: optional_env("BACKBLAZE_SECRET_ACCESS_KEY"),
                         region: optional_env("BACKBLAZE_REGION")
                             .unwrap_or_else(|| "eu-central-003".to_owned()),
+                    },
+                }
+            },
+
+            email: {
+                let provider =
+                    optional_env("EMAIL_PROVIDER").unwrap_or_else(|| "disabled".to_owned());
+
+                if provider != "disabled" && provider != "brevo" {
+                    return Err(ConfigError::UnsupportedEmailProvider(provider));
+                }
+
+                EmailConfig {
+                    provider,
+                    from_email: optional_env("EMAIL_FROM_ADDRESS"),
+                    from_name: optional_env("EMAIL_FROM_NAME"),
+                    brevo: BrevoConfig {
+                        api_key: optional_env("BREVO_API_KEY"),
                     },
                 }
             },

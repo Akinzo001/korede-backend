@@ -17,6 +17,7 @@ use crate::{
     },
     port::{
         auth::AuthenticatedHospital,
+        email::EmailMessage,
         hospital::{HospitalRepositoryError, NewHospital, NewHospitalDocument},
     },
 };
@@ -184,6 +185,8 @@ pub async fn register_hospital(
     )
     .await?;
 
+    send_registration_acknowledgement(&state, &hospital).await;
+
     Ok(Json(RegisterHospitalResponse {
         hospital: HospitalResponse::from(hospital),
         documents: vec![
@@ -191,6 +194,32 @@ pub async fn register_hospital(
             HospitalDocumentResponse::from(medical_license_document),
         ],
     }))
+}
+
+async fn send_registration_acknowledgement(state: &AppState, hospital: &Hospital) {
+    let subject = "Korede Health verification request received".to_owned();
+    let text_body = format!(
+        "Hello {},\n\nYour hospital registration and verification documents have been received.\n\nOur team will review your CAC certificate, medical license, and hospital details. Once your credentials are verified, you will be notified by email.\n\nThank you,\nKorede Health",
+        hospital.name
+    );
+    let html_body = format!(
+        "<p>Hello {},</p><p>Your hospital registration and verification documents have been received.</p><p>Our team will review your CAC certificate, medical license, and hospital details. Once your credentials are verified, you will be notified by email.</p><p>Thank you,<br>Korede Health</p>",
+        hospital.name
+    );
+
+    if let Err(error) = state
+        .email_service
+        .send(EmailMessage {
+            to_email: hospital.email.clone(),
+            to_name: hospital.administrator_name.clone(),
+            subject,
+            text_body,
+            html_body: Some(html_body),
+        })
+        .await
+    {
+        tracing::error!(%error, hospital_id = %hospital.id, "failed to send hospital registration acknowledgement email");
+    }
 }
 
 #[utoipa::path(
