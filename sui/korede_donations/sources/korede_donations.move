@@ -34,7 +34,7 @@ public struct DonationRecorded has copy, drop {
     record_object_id: ID,
 }
 
-public entry fun record_donation(
+public fun record_donation(
     donor: address,
     case_id: vector<u8>,
     hospital_id: vector<u8>,
