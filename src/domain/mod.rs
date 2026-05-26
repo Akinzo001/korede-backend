@@ -7,6 +7,9 @@ pub mod hospital_document;
 // Hospital email OTP domain model.
 pub mod hospital_email_otp;
 
+// Hospital login OTP domain model.
+pub mod hospital_login_otp;
+
 // Medical fundraising case domain model and lifecycle status.
 pub mod medical_case;
 

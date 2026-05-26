@@ -6,6 +6,7 @@ use crate::domain::{
     hospital::Hospital,
     hospital_document::{HospitalDocument, HospitalDocumentType},
     hospital_email_otp::HospitalEmailOtp,
+    hospital_login_otp::HospitalLoginOtp,
 };
 
 #[derive(Debug, Clone)]
@@ -40,6 +41,26 @@ pub struct NewHospitalEmailOtp {
     pub email: String,
     pub otp_hash: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewHospitalLoginOtp {
+    pub hospital_id: Uuid,
+    pub email: String,
+    pub otp_hash: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewHospitalAuditLog {
+    pub hospital_id: Option<Uuid>,
+    pub email: Option<String>,
+    pub event_type: String,
+    pub success: bool,
+    pub reason: Option<String>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Error)]
@@ -112,4 +133,31 @@ pub trait HospitalRepository: Send + Sync {
         &self,
         hospital_id: Uuid,
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>, HospitalRepositoryError>;
+
+    async fn create_login_otp(
+        &self,
+        otp: NewHospitalLoginOtp,
+    ) -> Result<HospitalLoginOtp, HospitalRepositoryError>;
+
+    async fn find_login_otp_by_id(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<Option<HospitalLoginOtp>, HospitalRepositoryError>;
+
+    async fn increment_login_otp_attempts(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError>;
+
+    async fn mark_login_otp_used(&self, otp_id: Uuid) -> Result<(), HospitalRepositoryError>;
+
+    async fn invalidate_active_login_otps(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError>;
+
+    async fn save_audit_log(
+        &self,
+        audit_log: NewHospitalAuditLog,
+    ) -> Result<(), HospitalRepositoryError>;
 }

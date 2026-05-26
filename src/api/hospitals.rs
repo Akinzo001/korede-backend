@@ -1,6 +1,7 @@
 use axum::{
     Json, Router,
     extract::State,
+    http::HeaderMap,
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
@@ -19,7 +20,8 @@ use crate::{
         auth::AuthenticatedHospital,
         email::EmailMessage,
         hospital::{
-            HospitalRepositoryError, NewHospital, NewHospitalDocument, NewHospitalEmailOtp,
+            HospitalRepositoryError, NewHospital, NewHospitalAuditLog, NewHospitalDocument,
+            NewHospitalEmailOtp, NewHospitalLoginOtp,
         },
     },
 };
@@ -35,6 +37,7 @@ pub fn routes() -> Router<AppState> {
         .route("/verify-email", post(verify_hospital_email))
         .route("/resend-otp", post(resend_hospital_email_otp))
         .route("/login", post(login_hospital))
+        .route("/login/verify-otp", post(verify_login_otp))
         .route("/me", get(current_hospital))
         .route("/documents", get(list_documents))
 }
@@ -128,6 +131,21 @@ pub struct LoginHospitalRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LoginHospitalResponse {
+    pub login_challenge_id: Uuid,
+    pub email: String,
+    pub otp_required: bool,
+    pub otp_expires_in_seconds: i64,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct VerifyLoginOtpRequest {
+    pub login_challenge_id: Uuid,
+    pub otp: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VerifyLoginOtpResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_in: i64,
@@ -301,6 +319,40 @@ async fn send_email_verification_otp(
         .map_err(|error| {
             tracing::error!(%error, "failed to send hospital email verification OTP");
             ApiError::Internal("failed to send email verification OTP".to_owned())
+        })
+}
+
+async fn send_login_otp(
+    state: &AppState,
+    email: &str,
+    administrator_name: &str,
+    otp: &str,
+) -> Result<(), ApiError> {
+    let subject = "Your Korede Health login code".to_owned();
+    let text_body = format!(
+        "Hello {},\n\nYour Korede Health login code is {}.\n\nThis code expires in 5 minutes.\n\nIf you did not try to log in, please secure your account immediately.\n\nThank you,\nKorede Health",
+        administrator_name.trim(),
+        otp
+    );
+    let html_body = format!(
+        "<p>Hello {},</p><p>Your Korede Health login code is <strong>{}</strong>.</p><p>This code expires in 5 minutes.</p><p>If you did not try to log in, please secure your account immediately.</p><p>Thank you,<br>Korede Health</p>",
+        administrator_name.trim(),
+        otp
+    );
+
+    state
+        .email_service
+        .send(EmailMessage {
+            to_email: email.to_owned(),
+            to_name: Some(administrator_name.trim().to_owned()),
+            subject,
+            text_body,
+            html_body: Some(html_body),
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to send hospital login OTP");
+            ApiError::Internal("failed to send login OTP".to_owned())
         })
 }
 
@@ -495,30 +547,69 @@ pub async fn resend_hospital_email_otp(
     tag = "Hospitals",
     request_body = LoginHospitalRequest,
     responses(
-        (status = 200, description = "Hospital logged in successfully.", body = LoginHospitalResponse),
+        (status = 200, description = "Password accepted and login OTP sent.", body = LoginHospitalResponse),
         (status = 401, description = "Invalid email or password.")
     )
 )]
 pub async fn login_hospital(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<LoginHospitalRequest>,
 ) -> Result<Json<LoginHospitalResponse>, ApiError> {
+    let audit_context = AuditContext::from_headers(&headers);
+    let email = request.email.trim().to_lowercase();
     let hospital = state
         .hospital_repository
-        .find_hospital_by_email(request.email.trim())
-        .await?
-        .ok_or_else(invalid_credentials)?;
+        .find_hospital_by_email(&email)
+        .await?;
+
+    let Some(hospital) = hospital else {
+        audit_hospital_event(
+            &state,
+            None,
+            Some(email),
+            "login_failure",
+            false,
+            Some("invalid_credentials"),
+            &audit_context,
+            serde_json::json!({ "stage": "password" }),
+        )
+        .await;
+        return Err(invalid_credentials());
+    };
 
     let password_matches = state
         .password_hasher
         .verify_password(&request.password, &hospital.password_hash)
-        .map_err(|_| invalid_credentials())?;
+        .unwrap_or(false);
 
     if !password_matches {
+        audit_hospital_event(
+            &state,
+            Some(hospital.id),
+            Some(hospital.email.clone()),
+            "login_failure",
+            false,
+            Some("invalid_credentials"),
+            &audit_context,
+            serde_json::json!({ "stage": "password" }),
+        )
+        .await;
         return Err(invalid_credentials());
     }
 
     if !hospital.email_verified {
+        audit_hospital_event(
+            &state,
+            Some(hospital.id),
+            Some(hospital.email.clone()),
+            "login_failure",
+            false,
+            Some("email_verification_required"),
+            &audit_context,
+            serde_json::json!({ "stage": "password" }),
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "email verification required".to_owned(),
         ));
@@ -526,11 +617,33 @@ pub async fn login_hospital(
 
     match hospital.verification_status {
         HospitalVerificationStatus::Rejected => {
+            audit_hospital_event(
+                &state,
+                Some(hospital.id),
+                Some(hospital.email.clone()),
+                "login_failure",
+                false,
+                Some("hospital_verification_rejected"),
+                &audit_context,
+                serde_json::json!({ "stage": "password" }),
+            )
+            .await;
             return Err(ApiError::Forbidden(
                 "hospital verification was rejected".to_owned(),
             ));
         }
         HospitalVerificationStatus::Suspended => {
+            audit_hospital_event(
+                &state,
+                Some(hospital.id),
+                Some(hospital.email.clone()),
+                "login_failure",
+                false,
+                Some("hospital_account_suspended"),
+                &audit_context,
+                serde_json::json!({ "stage": "password" }),
+            )
+            .await;
             return Err(ApiError::Forbidden(
                 "hospital account is suspended".to_owned(),
             ));
@@ -538,12 +651,184 @@ pub async fn login_hospital(
         HospitalVerificationStatus::Pending | HospitalVerificationStatus::Verified => {}
     }
 
+    state
+        .hospital_repository
+        .invalidate_active_login_otps(hospital.id)
+        .await?;
+
+    let otp = generate_otp();
+    send_login_otp(
+        &state,
+        &hospital.email,
+        hospital
+            .administrator_name
+            .as_deref()
+            .unwrap_or(&hospital.name),
+        &otp,
+    )
+    .await?;
+
+    let otp_hash = state
+        .password_hasher
+        .hash_password(&otp)
+        .map_err(|_| ApiError::Internal("failed to hash OTP".to_owned()))?;
+
+    let login_otp = state
+        .hospital_repository
+        .create_login_otp(NewHospitalLoginOtp {
+            hospital_id: hospital.id,
+            email: hospital.email.clone(),
+            otp_hash,
+            expires_at: Utc::now() + Duration::seconds(OTP_EXPIRES_IN_SECONDS),
+        })
+        .await?;
+
+    audit_hospital_event(
+        &state,
+        Some(hospital.id),
+        Some(hospital.email.clone()),
+        "otp_sent",
+        true,
+        None,
+        &audit_context,
+        serde_json::json!({ "purpose": "login", "challenge_id": login_otp.id }),
+    )
+    .await;
+
+    Ok(Json(LoginHospitalResponse {
+        login_challenge_id: login_otp.id,
+        email: hospital.email,
+        otp_required: true,
+        otp_expires_in_seconds: OTP_EXPIRES_IN_SECONDS,
+        message: "Password accepted. Please verify the OTP sent to your email.".to_owned(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/hospitals/login/verify-otp",
+    tag = "Hospitals",
+    request_body = VerifyLoginOtpRequest,
+    responses(
+        (status = 200, description = "Hospital logged in successfully.", body = VerifyLoginOtpResponse),
+        (status = 400, description = "Invalid or expired OTP.")
+    )
+)]
+pub async fn verify_login_otp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<VerifyLoginOtpRequest>,
+) -> Result<Json<VerifyLoginOtpResponse>, ApiError> {
+    validate_login_otp_request(&request.otp)?;
+
+    let audit_context = AuditContext::from_headers(&headers);
+    let login_otp = state
+        .hospital_repository
+        .find_login_otp_by_id(request.login_challenge_id)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("invalid or expired OTP".to_owned()))?;
+
+    let hospital = state
+        .hospital_repository
+        .find_hospital_by_id(login_otp.hospital_id)
+        .await?
+        .ok_or(HospitalRepositoryError::NotFound)?;
+
+    if login_otp.used_at.is_some() {
+        audit_hospital_event(
+            &state,
+            Some(login_otp.hospital_id),
+            Some(login_otp.email.clone()),
+            "otp_failed",
+            false,
+            Some("otp_already_used"),
+            &audit_context,
+            serde_json::json!({ "purpose": "login", "challenge_id": login_otp.id }),
+        )
+        .await;
+        return Err(ApiError::BadRequest("OTP has already been used".to_owned()));
+    }
+
+    if login_otp.expires_at <= Utc::now() {
+        audit_hospital_event(
+            &state,
+            Some(login_otp.hospital_id),
+            Some(login_otp.email.clone()),
+            "otp_failed",
+            false,
+            Some("otp_expired"),
+            &audit_context,
+            serde_json::json!({ "purpose": "login", "challenge_id": login_otp.id }),
+        )
+        .await;
+        return Err(ApiError::BadRequest("OTP has expired".to_owned()));
+    }
+
+    if login_otp.attempt_count >= OTP_MAX_ATTEMPTS {
+        audit_hospital_event(
+            &state,
+            Some(login_otp.hospital_id),
+            Some(login_otp.email.clone()),
+            "otp_failed",
+            false,
+            Some("maximum_attempts_exceeded"),
+            &audit_context,
+            serde_json::json!({ "purpose": "login", "challenge_id": login_otp.id }),
+        )
+        .await;
+        return Err(ApiError::BadRequest(
+            "maximum OTP verification attempts exceeded".to_owned(),
+        ));
+    }
+
+    let otp_matches = state
+        .password_hasher
+        .verify_password(request.otp.trim(), &login_otp.otp_hash)
+        .unwrap_or(false);
+
+    if !otp_matches {
+        state
+            .hospital_repository
+            .increment_login_otp_attempts(login_otp.id)
+            .await?;
+
+        audit_hospital_event(
+            &state,
+            Some(login_otp.hospital_id),
+            Some(login_otp.email.clone()),
+            "otp_failed",
+            false,
+            Some("invalid_otp"),
+            &audit_context,
+            serde_json::json!({ "purpose": "login", "challenge_id": login_otp.id }),
+        )
+        .await;
+        return Err(ApiError::BadRequest("invalid OTP".to_owned()));
+    }
+
+    state
+        .hospital_repository
+        .mark_login_otp_used(login_otp.id)
+        .await?;
+
     let access_token = state
         .token_service
         .create_access_token(hospital.id, &hospital.email)
         .map_err(|_| ApiError::Internal("failed to create access token".to_owned()))?;
 
-    Ok(Json(LoginHospitalResponse {
+    audit_hospital_event(
+        &state,
+        Some(hospital.id),
+        Some(hospital.email.clone()),
+        "login_success",
+        true,
+        None,
+        &audit_context,
+        serde_json::json!({ "challenge_id": login_otp.id }),
+    )
+    .await;
+
+    Ok(Json(VerifyLoginOtpResponse {
         access_token,
         token_type: "Bearer".to_owned(),
         expires_in: state.jwt_expires_in_seconds,
@@ -655,6 +940,10 @@ fn validate_email_otp_request(email: &str, otp: &str) -> Result<(), ApiError> {
         return Err(ApiError::BadRequest("email is invalid".to_owned()));
     }
 
+    validate_login_otp_request(otp)
+}
+
+fn validate_login_otp_request(otp: &str) -> Result<(), ApiError> {
     let otp = otp.trim();
     if otp.len() != OTP_LENGTH || !otp.chars().all(|character| character.is_ascii_digit()) {
         return Err(ApiError::BadRequest(
@@ -663,6 +952,61 @@ fn validate_email_otp_request(email: &str, otp: &str) -> Result<(), ApiError> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct AuditContext {
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+}
+
+impl AuditContext {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        Self {
+            ip_address: header_value(headers, "x-forwarded-for")
+                .and_then(|value| value.split(',').next().map(str::trim).map(str::to_owned))
+                .filter(|value| !value.is_empty())
+                .or_else(|| header_value(headers, "x-real-ip")),
+            user_agent: header_value(headers, "user-agent"),
+        }
+    }
+}
+
+fn header_value(headers: &HeaderMap, key: &str) -> Option<String> {
+    headers
+        .get(key)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+async fn audit_hospital_event(
+    state: &AppState,
+    hospital_id: Option<Uuid>,
+    email: Option<String>,
+    event_type: &str,
+    success: bool,
+    reason: Option<&str>,
+    context: &AuditContext,
+    metadata: serde_json::Value,
+) {
+    if let Err(error) = state
+        .hospital_repository
+        .save_audit_log(NewHospitalAuditLog {
+            hospital_id,
+            email,
+            event_type: event_type.to_owned(),
+            success,
+            reason: reason.map(str::to_owned),
+            ip_address: context.ip_address.clone(),
+            user_agent: context.user_agent.clone(),
+            metadata,
+        })
+        .await
+    {
+        tracing::error!(%error, %event_type, "failed to save hospital audit log");
+    }
 }
 
 fn generate_otp() -> String {

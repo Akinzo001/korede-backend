@@ -10,10 +10,11 @@ use crate::{
             HospitalDocument, HospitalDocumentStatus, HospitalDocumentType, StorageProvider,
         },
         hospital_email_otp::HospitalEmailOtp,
+        hospital_login_otp::HospitalLoginOtp,
     },
     port::hospital::{
         HospitalRepository, HospitalRepositoryError, NewHospital, NewHospitalDocument,
-        NewHospitalEmailOtp,
+        NewHospitalAuditLog, NewHospitalEmailOtp, NewHospitalLoginOtp,
     },
 };
 
@@ -438,6 +439,163 @@ impl HospitalRepository for PostgresHospitalRepository {
 
         Ok(created_at)
     }
+
+    async fn create_login_otp(
+        &self,
+        otp: NewHospitalLoginOtp,
+    ) -> Result<HospitalLoginOtp, HospitalRepositoryError> {
+        let id = Uuid::new_v4();
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO hospital_login_otps (
+                id,
+                hospital_id,
+                email,
+                otp_hash,
+                expires_at,
+                used_at,
+                attempt_count,
+                created_at
+            )
+            VALUES ($1, $2, LOWER($3), $4, $5, NULL, 0, NOW())
+            RETURNING
+                id,
+                hospital_id,
+                email,
+                otp_hash,
+                expires_at,
+                used_at,
+                attempt_count,
+                created_at
+            "#,
+        )
+        .bind(id)
+        .bind(otp.hospital_id)
+        .bind(otp.email)
+        .bind(otp.otp_hash)
+        .bind(otp.expires_at)
+        .fetch_one(&self.pool)
+        .await?;
+
+        login_otp_from_row(&row).map_err(HospitalRepositoryError::Database)
+    }
+
+    async fn find_login_otp_by_id(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<Option<HospitalLoginOtp>, HospitalRepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hospital_id,
+                email,
+                otp_hash,
+                expires_at,
+                used_at,
+                attempt_count,
+                created_at
+            FROM hospital_login_otps
+            WHERE id = $1
+            "#,
+        )
+        .bind(otp_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| login_otp_from_row(&row))
+            .transpose()
+            .map_err(HospitalRepositoryError::Database)
+    }
+
+    async fn increment_login_otp_attempts(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE hospital_login_otps
+            SET attempt_count = attempt_count + 1
+            WHERE id = $1
+            "#,
+        )
+        .bind(otp_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn mark_login_otp_used(&self, otp_id: Uuid) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE hospital_login_otps
+            SET used_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(otp_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn invalidate_active_login_otps(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE hospital_login_otps
+            SET used_at = NOW()
+            WHERE hospital_id = $1
+              AND used_at IS NULL
+            "#,
+        )
+        .bind(hospital_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn save_audit_log(
+        &self,
+        audit_log: NewHospitalAuditLog,
+    ) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            INSERT INTO hospital_audit_logs (
+                id,
+                hospital_id,
+                email,
+                event_type,
+                success,
+                reason,
+                ip_address,
+                user_agent,
+                metadata,
+                created_at
+            )
+            VALUES ($1, $2, LOWER($3), $4, $5, $6, $7, $8, $9, NOW())
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(audit_log.hospital_id)
+        .bind(audit_log.email)
+        .bind(audit_log.event_type)
+        .bind(audit_log.success)
+        .bind(audit_log.reason)
+        .bind(audit_log.ip_address)
+        .bind(audit_log.user_agent)
+        .bind(audit_log.metadata)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
 }
 
 fn hospital_from_row(row: &sqlx::postgres::PgRow) -> Result<Hospital, sqlx::Error> {
@@ -464,6 +622,19 @@ fn hospital_from_row(row: &sqlx::postgres::PgRow) -> Result<Hospital, sqlx::Erro
 
 fn email_otp_from_row(row: &sqlx::postgres::PgRow) -> Result<HospitalEmailOtp, sqlx::Error> {
     Ok(HospitalEmailOtp {
+        id: row.try_get("id")?,
+        hospital_id: row.try_get("hospital_id")?,
+        email: row.try_get("email")?,
+        otp_hash: row.try_get("otp_hash")?,
+        expires_at: row.try_get("expires_at")?,
+        used_at: row.try_get("used_at")?,
+        attempt_count: row.try_get("attempt_count")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn login_otp_from_row(row: &sqlx::postgres::PgRow) -> Result<HospitalLoginOtp, sqlx::Error> {
+    Ok(HospitalLoginOtp {
         id: row.try_get("id")?,
         hospital_id: row.try_get("hospital_id")?,
         email: row.try_get("email")?,

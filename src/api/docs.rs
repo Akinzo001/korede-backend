@@ -11,6 +11,7 @@ use crate::api::{
         HospitalResponse, HospitalSummaryResponse, LoginHospitalRequest, LoginHospitalResponse,
         RegisterHospitalRequest, RegisterHospitalResponse, ResendHospitalEmailOtpRequest,
         ResendHospitalEmailOtpResponse, VerifyHospitalEmailRequest, VerifyHospitalEmailResponse,
+        VerifyLoginOtpRequest, VerifyLoginOtpResponse,
     },
 };
 
@@ -33,6 +34,7 @@ use crate::api::{
         crate::api::hospitals::verify_hospital_email,
         crate::api::hospitals::resend_hospital_email_otp,
         crate::api::hospitals::login_hospital,
+        crate::api::hospitals::verify_login_otp,
         crate::api::hospitals::current_hospital,
         crate::api::hospitals::list_documents
     ),
@@ -51,6 +53,8 @@ use crate::api::{
             HospitalResponse,
             LoginHospitalRequest,
             LoginHospitalResponse,
+            VerifyLoginOtpRequest,
+            VerifyLoginOtpResponse,
             HospitalSummaryResponse,
             HospitalDocumentResponse,
             HospitalDocumentsResponse
