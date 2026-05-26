@@ -9,7 +9,8 @@ use crate::api::{
     hospitals::{
         Base64DocumentRequest, HospitalDocumentResponse, HospitalDocumentsResponse,
         HospitalResponse, HospitalSummaryResponse, LoginHospitalRequest, LoginHospitalResponse,
-        RegisterHospitalRequest, RegisterHospitalResponse,
+        RegisterHospitalRequest, RegisterHospitalResponse, ResendHospitalEmailOtpRequest,
+        ResendHospitalEmailOtpResponse, VerifyHospitalEmailRequest, VerifyHospitalEmailResponse,
     },
 };
 
@@ -29,6 +30,8 @@ use crate::api::{
         crate::api::health::health_check,
         crate::api::health::database_health_check,
         crate::api::hospitals::register_hospital,
+        crate::api::hospitals::verify_hospital_email,
+        crate::api::hospitals::resend_hospital_email_otp,
         crate::api::hospitals::login_hospital,
         crate::api::hospitals::current_hospital,
         crate::api::hospitals::list_documents
@@ -41,6 +44,10 @@ use crate::api::{
             Base64DocumentRequest,
             RegisterHospitalRequest,
             RegisterHospitalResponse,
+            VerifyHospitalEmailRequest,
+            VerifyHospitalEmailResponse,
+            ResendHospitalEmailOtpRequest,
+            ResendHospitalEmailOtpResponse,
             HospitalResponse,
             LoginHospitalRequest,
             LoginHospitalResponse,

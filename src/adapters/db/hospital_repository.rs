@@ -9,9 +9,11 @@ use crate::{
         hospital_document::{
             HospitalDocument, HospitalDocumentStatus, HospitalDocumentType, StorageProvider,
         },
+        hospital_email_otp::HospitalEmailOtp,
     },
     port::hospital::{
         HospitalRepository, HospitalRepositoryError, NewHospital, NewHospitalDocument,
+        NewHospitalEmailOtp,
     },
 };
 
@@ -40,6 +42,8 @@ impl HospitalRepository for PostgresHospitalRepository {
                 id,
                 name,
                 email,
+                email_verified,
+                email_verified_at,
                 password_hash,
                 phone_number,
                 official_address,
@@ -58,6 +62,8 @@ impl HospitalRepository for PostgresHospitalRepository {
                 id,
                 name,
                 email,
+                email_verified,
+                email_verified_at,
                 password_hash,
                 phone_number,
                 official_address,
@@ -106,6 +112,8 @@ impl HospitalRepository for PostgresHospitalRepository {
                 id,
                 name,
                 email,
+                email_verified,
+                email_verified_at,
                 password_hash,
                 phone_number,
                 official_address,
@@ -141,6 +149,8 @@ impl HospitalRepository for PostgresHospitalRepository {
                 id,
                 name,
                 email,
+                email_verified,
+                email_verified_at,
                 password_hash,
                 phone_number,
                 official_address,
@@ -247,6 +257,187 @@ impl HospitalRepository for PostgresHospitalRepository {
             .collect::<Result<Vec<_>, _>>()
             .map_err(HospitalRepositoryError::Database)
     }
+
+    async fn create_email_otp(
+        &self,
+        otp: NewHospitalEmailOtp,
+    ) -> Result<HospitalEmailOtp, HospitalRepositoryError> {
+        let id = Uuid::new_v4();
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO hospital_email_otps (
+                id,
+                hospital_id,
+                email,
+                otp_hash,
+                expires_at,
+                used_at,
+                attempt_count,
+                created_at
+            )
+            VALUES ($1, $2, LOWER($3), $4, $5, NULL, 0, NOW())
+            RETURNING
+                id,
+                hospital_id,
+                email,
+                otp_hash,
+                expires_at,
+                used_at,
+                attempt_count,
+                created_at
+            "#,
+        )
+        .bind(id)
+        .bind(otp.hospital_id)
+        .bind(otp.email)
+        .bind(otp.otp_hash)
+        .bind(otp.expires_at)
+        .fetch_one(&self.pool)
+        .await?;
+
+        email_otp_from_row(&row).map_err(HospitalRepositoryError::Database)
+    }
+
+    async fn find_latest_email_otp(
+        &self,
+        email: &str,
+    ) -> Result<Option<HospitalEmailOtp>, HospitalRepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hospital_id,
+                email,
+                otp_hash,
+                expires_at,
+                used_at,
+                attempt_count,
+                created_at
+            FROM hospital_email_otps
+            WHERE LOWER(email) = LOWER($1)
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| email_otp_from_row(&row))
+            .transpose()
+            .map_err(HospitalRepositoryError::Database)
+    }
+
+    async fn increment_email_otp_attempts(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE hospital_email_otps
+            SET attempt_count = attempt_count + 1
+            WHERE id = $1
+            "#,
+        )
+        .bind(otp_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn mark_email_otp_used(&self, otp_id: Uuid) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE hospital_email_otps
+            SET used_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(otp_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn mark_hospital_email_verified(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<Hospital, HospitalRepositoryError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE hospitals
+            SET email_verified = TRUE,
+                email_verified_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING
+                id,
+                name,
+                email,
+                email_verified,
+                email_verified_at,
+                password_hash,
+                phone_number,
+                official_address,
+                administrator_name,
+                cac_registration_number,
+                medical_license_number,
+                corporate_account_name,
+                corporate_account_number,
+                bank_name,
+                verification_status,
+                created_at,
+                updated_at
+            "#,
+        )
+        .bind(hospital_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        hospital_from_row(&row).map_err(HospitalRepositoryError::Database)
+    }
+
+    async fn invalidate_active_email_otps(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE hospital_email_otps
+            SET used_at = NOW()
+            WHERE hospital_id = $1
+              AND used_at IS NULL
+            "#,
+        )
+        .bind(hospital_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn latest_email_otp_created_at(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<Option<DateTime<Utc>>, HospitalRepositoryError> {
+        let created_at = sqlx::query_scalar(
+            r#"
+            SELECT created_at
+            FROM hospital_email_otps
+            WHERE hospital_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(hospital_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(created_at)
+    }
 }
 
 fn hospital_from_row(row: &sqlx::postgres::PgRow) -> Result<Hospital, sqlx::Error> {
@@ -254,6 +445,8 @@ fn hospital_from_row(row: &sqlx::postgres::PgRow) -> Result<Hospital, sqlx::Erro
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         email: row.try_get("email")?,
+        email_verified: row.try_get("email_verified")?,
+        email_verified_at: row.try_get("email_verified_at")?,
         password_hash: row.try_get("password_hash")?,
         phone_number: row.try_get("phone_number")?,
         official_address: row.try_get("official_address")?,
@@ -266,6 +459,19 @@ fn hospital_from_row(row: &sqlx::postgres::PgRow) -> Result<Hospital, sqlx::Erro
         verification_status: verification_status_from_str(row.try_get("verification_status")?),
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn email_otp_from_row(row: &sqlx::postgres::PgRow) -> Result<HospitalEmailOtp, sqlx::Error> {
+    Ok(HospitalEmailOtp {
+        id: row.try_get("id")?,
+        hospital_id: row.try_get("hospital_id")?,
+        email: row.try_get("email")?,
+        otp_hash: row.try_get("otp_hash")?,
+        expires_at: row.try_get("expires_at")?,
+        used_at: row.try_get("used_at")?,
+        attempt_count: row.try_get("attempt_count")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 

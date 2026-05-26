@@ -47,6 +47,10 @@ pub struct Hospital {
     // Login email for the hospital account.
     pub email: String,
 
+    pub email_verified: bool,
+
+    pub email_verified_at: Option<DateTime<Utc>>,
+
     // Hashed password used for authentication.
     //
     // This must never contain the raw password.

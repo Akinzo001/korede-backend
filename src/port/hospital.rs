@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::domain::{
     hospital::Hospital,
     hospital_document::{HospitalDocument, HospitalDocumentType},
+    hospital_email_otp::HospitalEmailOtp,
 };
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,14 @@ pub struct NewHospitalDocument {
     pub original_filename: String,
     pub mime_type: String,
     pub file_size_bytes: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewHospitalEmailOtp {
+    pub hospital_id: Uuid,
+    pub email: String,
+    pub otp_hash: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Error)]
@@ -71,4 +80,36 @@ pub trait HospitalRepository: Send + Sync {
         &self,
         hospital_id: Uuid,
     ) -> Result<Vec<HospitalDocument>, HospitalRepositoryError>;
+
+    async fn create_email_otp(
+        &self,
+        otp: NewHospitalEmailOtp,
+    ) -> Result<HospitalEmailOtp, HospitalRepositoryError>;
+
+    async fn find_latest_email_otp(
+        &self,
+        email: &str,
+    ) -> Result<Option<HospitalEmailOtp>, HospitalRepositoryError>;
+
+    async fn increment_email_otp_attempts(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError>;
+
+    async fn mark_email_otp_used(&self, otp_id: Uuid) -> Result<(), HospitalRepositoryError>;
+
+    async fn mark_hospital_email_verified(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<Hospital, HospitalRepositoryError>;
+
+    async fn invalidate_active_email_otps(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError>;
+
+    async fn latest_email_otp_created_at(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, HospitalRepositoryError>;
 }

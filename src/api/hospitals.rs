@@ -4,7 +4,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -18,13 +18,22 @@ use crate::{
     port::{
         auth::AuthenticatedHospital,
         email::EmailMessage,
-        hospital::{HospitalRepositoryError, NewHospital, NewHospitalDocument},
+        hospital::{
+            HospitalRepositoryError, NewHospital, NewHospitalDocument, NewHospitalEmailOtp,
+        },
     },
 };
+
+const OTP_LENGTH: usize = 6;
+const OTP_EXPIRES_IN_SECONDS: i64 = 300;
+const OTP_MAX_ATTEMPTS: i32 = 5;
+const OTP_RESEND_COOLDOWN_SECONDS: i64 = 60;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/register", post(register_hospital))
+        .route("/verify-email", post(verify_hospital_email))
+        .route("/resend-otp", post(resend_hospital_email_otp))
         .route("/login", post(login_hospital))
         .route("/me", get(current_hospital))
         .route("/documents", get(list_documents))
@@ -57,8 +66,38 @@ pub struct Base64DocumentRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RegisterHospitalResponse {
-    pub hospital: HospitalResponse,
-    pub documents: Vec<HospitalDocumentResponse>,
+    pub hospital_id: Uuid,
+    pub email: String,
+    pub email_verification_required: bool,
+    pub otp_expires_in_seconds: i64,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct VerifyHospitalEmailRequest {
+    pub email: String,
+    pub otp: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VerifyHospitalEmailResponse {
+    pub hospital_id: Uuid,
+    pub email: String,
+    pub email_verified: bool,
+    pub verification_status: HospitalVerificationStatus,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ResendHospitalEmailOtpRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ResendHospitalEmailOtpResponse {
+    pub email: String,
+    pub otp_expires_in_seconds: i64,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -66,6 +105,8 @@ pub struct HospitalResponse {
     pub id: Uuid,
     pub name: String,
     pub email: String,
+    pub email_verified: bool,
+    pub email_verified_at: Option<DateTime<Utc>>,
     pub phone_number: Option<String>,
     pub official_address: Option<String>,
     pub administrator_name: Option<String>,
@@ -90,6 +131,7 @@ pub struct LoginHospitalResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_in: i64,
+    pub dashboard_access: String,
     pub hospital: HospitalSummaryResponse,
 }
 
@@ -98,6 +140,7 @@ pub struct HospitalSummaryResponse {
     pub id: Uuid,
     pub name: String,
     pub email: String,
+    pub email_verified: bool,
     pub verification_status: HospitalVerificationStatus,
 }
 
@@ -140,6 +183,19 @@ pub async fn register_hospital(
     let cac_document = decode_base64_document(&request.cac_document, state.max_upload_bytes)?;
     let medical_license_document =
         decode_base64_document(&request.medical_license_document, state.max_upload_bytes)?;
+    let email = request.email.trim().to_lowercase();
+
+    if state
+        .hospital_repository
+        .find_hospital_by_email(&email)
+        .await?
+        .is_some()
+    {
+        return Err(HospitalRepositoryError::DuplicateEmail.into());
+    }
+
+    let otp = generate_otp();
+    send_email_verification_otp(&state, &email, &request.administrator_name, &otp).await?;
 
     let password_hash = state
         .password_hasher
@@ -150,7 +206,7 @@ pub async fn register_hospital(
         .hospital_repository
         .create_hospital(NewHospital {
             name: request.name.trim().to_owned(),
-            email: request.email.trim().to_lowercase(),
+            email: email.clone(),
             password_hash,
             phone_number: request.phone_number.map(|value| value.trim().to_owned()),
             official_address: request.official_address.trim().to_owned(),
@@ -172,6 +228,7 @@ pub async fn register_hospital(
         hospital.id,
         HospitalDocumentType::CacCertificate,
         &request.cac_document,
+        normalized_pdf_mime_type(&request.cac_document.mime_type)?,
         &cac_document,
     )
     .await?;
@@ -181,22 +238,76 @@ pub async fn register_hospital(
         hospital.id,
         HospitalDocumentType::MedicalLicense,
         &request.medical_license_document,
+        normalized_pdf_mime_type(&request.medical_license_document.mime_type)?,
         &medical_license_document,
     )
     .await?;
 
-    send_registration_acknowledgement(&state, &hospital).await;
+    let otp_hash = state
+        .password_hasher
+        .hash_password(&otp)
+        .map_err(|_| ApiError::Internal("failed to hash OTP".to_owned()))?;
+
+    state
+        .hospital_repository
+        .create_email_otp(NewHospitalEmailOtp {
+            hospital_id: hospital.id,
+            email: email.clone(),
+            otp_hash,
+            expires_at: Utc::now() + Duration::seconds(OTP_EXPIRES_IN_SECONDS),
+        })
+        .await?;
+
+    let _ = (cac_document, medical_license_document);
 
     Ok(Json(RegisterHospitalResponse {
-        hospital: HospitalResponse::from(hospital),
-        documents: vec![
-            HospitalDocumentResponse::from(cac_document),
-            HospitalDocumentResponse::from(medical_license_document),
-        ],
+        hospital_id: hospital.id,
+        email,
+        email_verification_required: true,
+        otp_expires_in_seconds: OTP_EXPIRES_IN_SECONDS,
+        message: "Registration received. Please verify your email with the OTP sent to your inbox."
+            .to_owned(),
     }))
 }
 
-async fn send_registration_acknowledgement(state: &AppState, hospital: &Hospital) {
+async fn send_email_verification_otp(
+    state: &AppState,
+    email: &str,
+    administrator_name: &str,
+    otp: &str,
+) -> Result<(), ApiError> {
+    let subject = "Verify your Korede Health email".to_owned();
+    let text_body = format!(
+        "Hello {},\n\nYour Korede Health verification code is {}.\n\nThis code expires in 5 minutes.\n\nIf you did not start this registration, you can ignore this email.\n\nThank you,\nKorede Health",
+        administrator_name.trim(),
+        otp
+    );
+    let html_body = format!(
+        "<p>Hello {},</p><p>Your Korede Health verification code is <strong>{}</strong>.</p><p>This code expires in 5 minutes.</p><p>If you did not start this registration, you can ignore this email.</p><p>Thank you,<br>Korede Health</p>",
+        administrator_name.trim(),
+        otp
+    );
+
+    state
+        .email_service
+        .send(EmailMessage {
+            to_email: email.to_owned(),
+            to_name: Some(administrator_name.trim().to_owned()),
+            subject,
+            text_body,
+            html_body: Some(html_body),
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to send hospital email verification OTP");
+            ApiError::Internal("failed to send email verification OTP".to_owned())
+        })
+}
+
+async fn send_registration_acknowledgement(
+    state: &AppState,
+    hospital: &Hospital,
+) -> Result<(), ApiError> {
     let subject = "Korede Health verification request received".to_owned();
     let text_body = format!(
         "Hello {},\n\nYour hospital registration and verification documents have been received.\n\nOur team will review your CAC certificate, medical license, and hospital details. Once your credentials are verified, you will be notified by email.\n\nThank you,\nKorede Health",
@@ -207,7 +318,7 @@ async fn send_registration_acknowledgement(state: &AppState, hospital: &Hospital
         hospital.name
     );
 
-    if let Err(error) = state
+    state
         .email_service
         .send(EmailMessage {
             to_email: hospital.email.clone(),
@@ -217,9 +328,165 @@ async fn send_registration_acknowledgement(state: &AppState, hospital: &Hospital
             html_body: Some(html_body),
         })
         .await
-    {
-        tracing::error!(%error, hospital_id = %hospital.id, "failed to send hospital registration acknowledgement email");
+        .map_err(|error| {
+            tracing::error!(%error, hospital_id = %hospital.id, "failed to send hospital registration acknowledgement email");
+            ApiError::Internal("failed to send registration acknowledgement email".to_owned())
+        })
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/hospitals/verify-email",
+    tag = "Hospitals",
+    request_body = VerifyHospitalEmailRequest,
+    responses(
+        (status = 200, description = "Hospital email verified successfully.", body = VerifyHospitalEmailResponse),
+        (status = 400, description = "Invalid or expired OTP."),
+        (status = 404, description = "Hospital was not found.")
+    )
+)]
+pub async fn verify_hospital_email(
+    State(state): State<AppState>,
+    Json(request): Json<VerifyHospitalEmailRequest>,
+) -> Result<Json<VerifyHospitalEmailResponse>, ApiError> {
+    validate_email_otp_request(&request.email, &request.otp)?;
+
+    let email = request.email.trim().to_lowercase();
+    let otp = state
+        .hospital_repository
+        .find_latest_email_otp(&email)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("invalid or expired OTP".to_owned()))?;
+
+    if otp.used_at.is_some() {
+        return Err(ApiError::BadRequest("OTP has already been used".to_owned()));
     }
+
+    if otp.expires_at <= Utc::now() {
+        return Err(ApiError::BadRequest("OTP has expired".to_owned()));
+    }
+
+    if otp.attempt_count >= OTP_MAX_ATTEMPTS {
+        return Err(ApiError::BadRequest(
+            "maximum OTP verification attempts exceeded".to_owned(),
+        ));
+    }
+
+    let otp_matches = state
+        .password_hasher
+        .verify_password(request.otp.trim(), &otp.otp_hash)
+        .map_err(|_| ApiError::BadRequest("invalid OTP".to_owned()))?;
+
+    if !otp_matches {
+        state
+            .hospital_repository
+            .increment_email_otp_attempts(otp.id)
+            .await?;
+
+        return Err(ApiError::BadRequest("invalid OTP".to_owned()));
+    }
+
+    state
+        .hospital_repository
+        .mark_email_otp_used(otp.id)
+        .await?;
+    let hospital = state
+        .hospital_repository
+        .mark_hospital_email_verified(otp.hospital_id)
+        .await?;
+
+    send_registration_acknowledgement(&state, &hospital).await?;
+
+    Ok(Json(VerifyHospitalEmailResponse {
+        hospital_id: hospital.id,
+        email: hospital.email,
+        email_verified: hospital.email_verified,
+        verification_status: hospital.verification_status,
+        message: "Email verified successfully. Your credentials are now pending admin review."
+            .to_owned(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/hospitals/resend-otp",
+    tag = "Hospitals",
+    request_body = ResendHospitalEmailOtpRequest,
+    responses(
+        (status = 200, description = "A new OTP was sent.", body = ResendHospitalEmailOtpResponse),
+        (status = 400, description = "Email is already verified or resend cooldown is active."),
+        (status = 404, description = "Hospital was not found.")
+    )
+)]
+pub async fn resend_hospital_email_otp(
+    State(state): State<AppState>,
+    Json(request): Json<ResendHospitalEmailOtpRequest>,
+) -> Result<Json<ResendHospitalEmailOtpResponse>, ApiError> {
+    if request.email.trim().is_empty() || !request.email.contains('@') {
+        return Err(ApiError::BadRequest("email is invalid".to_owned()));
+    }
+
+    let email = request.email.trim().to_lowercase();
+    let hospital = state
+        .hospital_repository
+        .find_hospital_by_email(&email)
+        .await?
+        .ok_or(HospitalRepositoryError::NotFound)?;
+
+    if hospital.email_verified {
+        return Err(ApiError::BadRequest("email is already verified".to_owned()));
+    }
+
+    if let Some(created_at) = state
+        .hospital_repository
+        .latest_email_otp_created_at(hospital.id)
+        .await?
+    {
+        let next_allowed_at = created_at + Duration::seconds(OTP_RESEND_COOLDOWN_SECONDS);
+        if next_allowed_at > Utc::now() {
+            return Err(ApiError::BadRequest(
+                "please wait before requesting another OTP".to_owned(),
+            ));
+        }
+    }
+
+    let otp = generate_otp();
+    send_email_verification_otp(
+        &state,
+        &hospital.email,
+        hospital
+            .administrator_name
+            .as_deref()
+            .unwrap_or(&hospital.name),
+        &otp,
+    )
+    .await?;
+
+    state
+        .hospital_repository
+        .invalidate_active_email_otps(hospital.id)
+        .await?;
+
+    let otp_hash = state
+        .password_hasher
+        .hash_password(&otp)
+        .map_err(|_| ApiError::Internal("failed to hash OTP".to_owned()))?;
+
+    state
+        .hospital_repository
+        .create_email_otp(NewHospitalEmailOtp {
+            hospital_id: hospital.id,
+            email: hospital.email.clone(),
+            otp_hash,
+            expires_at: Utc::now() + Duration::seconds(OTP_EXPIRES_IN_SECONDS),
+        })
+        .await?;
+
+    Ok(Json(ResendHospitalEmailOtpResponse {
+        email: hospital.email,
+        otp_expires_in_seconds: OTP_EXPIRES_IN_SECONDS,
+        message: "A new OTP has been sent to your email.".to_owned(),
+    }))
 }
 
 #[utoipa::path(
@@ -251,6 +518,26 @@ pub async fn login_hospital(
         return Err(invalid_credentials());
     }
 
+    if !hospital.email_verified {
+        return Err(ApiError::Forbidden(
+            "email verification required".to_owned(),
+        ));
+    }
+
+    match hospital.verification_status {
+        HospitalVerificationStatus::Rejected => {
+            return Err(ApiError::Forbidden(
+                "hospital verification was rejected".to_owned(),
+            ));
+        }
+        HospitalVerificationStatus::Suspended => {
+            return Err(ApiError::Forbidden(
+                "hospital account is suspended".to_owned(),
+            ));
+        }
+        HospitalVerificationStatus::Pending | HospitalVerificationStatus::Verified => {}
+    }
+
     let access_token = state
         .token_service
         .create_access_token(hospital.id, &hospital.email)
@@ -260,6 +547,7 @@ pub async fn login_hospital(
         access_token,
         token_type: "Bearer".to_owned(),
         expires_in: state.jwt_expires_in_seconds,
+        dashboard_access: dashboard_access_for(&hospital).to_owned(),
         hospital: HospitalSummaryResponse::from(&hospital),
     }))
 }
@@ -362,6 +650,33 @@ fn validate_registration(request: &RegisterHospitalRequest) -> Result<(), ApiErr
     Ok(())
 }
 
+fn validate_email_otp_request(email: &str, otp: &str) -> Result<(), ApiError> {
+    if email.trim().is_empty() || !email.contains('@') {
+        return Err(ApiError::BadRequest("email is invalid".to_owned()));
+    }
+
+    let otp = otp.trim();
+    if otp.len() != OTP_LENGTH || !otp.chars().all(|character| character.is_ascii_digit()) {
+        return Err(ApiError::BadRequest(
+            "OTP must be a 6-digit code".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn generate_otp() -> String {
+    let value = Uuid::new_v4().as_u128() % 1_000_000;
+    format!("{value:06}")
+}
+
+fn dashboard_access_for(hospital: &Hospital) -> &'static str {
+    match hospital.verification_status {
+        HospitalVerificationStatus::Verified => "full",
+        _ => "pending_review",
+    }
+}
+
 fn decode_base64_document(
     document: &Base64DocumentRequest,
     max_upload_bytes: usize,
@@ -396,6 +711,7 @@ async fn store_registration_document(
     hospital_id: Uuid,
     document_type: HospitalDocumentType,
     request: &Base64DocumentRequest,
+    mime_type: &str,
     contents: &[u8],
 ) -> Result<HospitalDocument, ApiError> {
     let stored = state
@@ -404,7 +720,7 @@ async fn store_registration_document(
             hospital_id,
             document_type.clone(),
             request.original_filename.trim(),
-            request.mime_type.trim(),
+            mime_type,
             contents,
         )
         .await
@@ -426,8 +742,12 @@ async fn store_registration_document(
 }
 
 fn validate_mime_type(mime_type: &str) -> Result<(), ApiError> {
-    match mime_type {
-        "application/pdf" => Ok(()),
+    normalized_pdf_mime_type(mime_type).map(|_| ())
+}
+
+fn normalized_pdf_mime_type(mime_type: &str) -> Result<&'static str, ApiError> {
+    match mime_type.trim().to_ascii_lowercase().as_str() {
+        "application/pdf" | "application/x-pdf" | "pdf" => Ok("application/pdf"),
         _ => Err(ApiError::UnsupportedMediaType(
             "only PDF files are supported".to_owned(),
         )),
@@ -444,6 +764,8 @@ impl From<Hospital> for HospitalResponse {
             id: hospital.id,
             name: hospital.name,
             email: hospital.email,
+            email_verified: hospital.email_verified,
+            email_verified_at: hospital.email_verified_at,
             phone_number: hospital.phone_number,
             official_address: hospital.official_address,
             administrator_name: hospital.administrator_name,
@@ -465,6 +787,7 @@ impl From<&Hospital> for HospitalSummaryResponse {
             id: hospital.id,
             name: hospital.name.clone(),
             email: hospital.email.clone(),
+            email_verified: hospital.email_verified,
             verification_status: hospital.verification_status.clone(),
         }
     }
@@ -488,6 +811,28 @@ impl From<HospitalDocument> for HospitalDocumentResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hospital_with_status(status: HospitalVerificationStatus) -> Hospital {
+        Hospital {
+            id: Uuid::new_v4(),
+            name: "Lagoon Hospital".to_owned(),
+            email: "admin@lagoon.example".to_owned(),
+            email_verified: true,
+            email_verified_at: Some(Utc::now()),
+            password_hash: "hash".to_owned(),
+            phone_number: Some("+2348012345678".to_owned()),
+            official_address: Some("1 Hospital Road, Lagos".to_owned()),
+            administrator_name: Some("Dr Jane Doe".to_owned()),
+            cac_registration_number: Some("RC123456".to_owned()),
+            medical_license_number: Some("ML123456".to_owned()),
+            corporate_account_name: "Lagoon Hospital Ltd".to_owned(),
+            corporate_account_number: "0123456789".to_owned(),
+            bank_name: "Wema Bank".to_owned(),
+            verification_status: status,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
 
     fn valid_registration_request() -> RegisterHospitalRequest {
         RegisterHospitalRequest {
@@ -579,6 +924,11 @@ mod tests {
     #[test]
     fn mime_validation_accepts_pdf() {
         assert!(validate_mime_type("application/pdf").is_ok());
+        assert!(validate_mime_type("Pdf").is_ok());
+        assert_eq!(
+            normalized_pdf_mime_type("Pdf").unwrap(),
+            "application/pdf"
+        );
     }
 
     #[test]
@@ -595,5 +945,44 @@ mod tests {
             validate_mime_type("text/plain"),
             Err(ApiError::UnsupportedMediaType(_))
         ));
+    }
+
+    #[test]
+    fn otp_generation_returns_six_digits() {
+        let otp = generate_otp();
+
+        assert_eq!(otp.len(), 6);
+        assert!(otp.chars().all(|character| character.is_ascii_digit()));
+    }
+
+    #[test]
+    fn email_otp_validation_accepts_valid_input() {
+        assert!(validate_email_otp_request("admin@hospital.com", "123456").is_ok());
+    }
+
+    #[test]
+    fn email_otp_validation_rejects_invalid_otp_shape() {
+        assert!(matches!(
+            validate_email_otp_request("admin@hospital.com", "12345"),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            validate_email_otp_request("admin@hospital.com", "abcdef"),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn dashboard_access_is_pending_review_for_pending_hospital() {
+        let hospital = hospital_with_status(HospitalVerificationStatus::Pending);
+
+        assert_eq!(dashboard_access_for(&hospital), "pending_review");
+    }
+
+    #[test]
+    fn dashboard_access_is_full_for_verified_hospital() {
+        let hospital = hospital_with_status(HospitalVerificationStatus::Verified);
+
+        assert_eq!(dashboard_access_for(&hospital), "full");
     }
 }

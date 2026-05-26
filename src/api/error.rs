@@ -16,6 +16,7 @@ pub struct ErrorResponse {
 pub enum ApiError {
     BadRequest(String),
     Unauthorized(String),
+    Forbidden(String),
     Conflict(String),
     PayloadTooLarge(String),
     UnsupportedMediaType(String),
@@ -27,6 +28,7 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
+            Self::Forbidden(message) => (StatusCode::FORBIDDEN, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::PayloadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message),
             Self::UnsupportedMediaType(message) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, message),
