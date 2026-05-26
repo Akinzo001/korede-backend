@@ -13,8 +13,8 @@ use crate::{
         hospital_login_otp::HospitalLoginOtp,
     },
     port::hospital::{
-        HospitalRepository, HospitalRepositoryError, NewHospital, NewHospitalDocument,
-        NewHospitalAuditLog, NewHospitalEmailOtp, NewHospitalLoginOtp,
+        HospitalRepository, HospitalRepositoryError, NewHospital, NewHospitalAuditLog,
+        NewHospitalDocument, NewHospitalEmailOtp, NewHospitalLoginOtp,
     },
 };
 

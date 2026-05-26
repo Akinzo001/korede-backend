@@ -1,4 +1,5 @@
 // Expose the API documentation module.
+pub mod admin;
 pub mod auth;
 pub mod docs;
 pub mod error;
@@ -49,6 +50,8 @@ pub struct AppState {
     pub email_service: Arc<dyn EmailService>,
     pub jwt_expires_in_seconds: i64,
     pub max_upload_bytes: usize,
+    pub super_admin_email: String,
+    pub super_admin_password: String,
 }
 
 // Build the full Axum application router.
@@ -65,6 +68,7 @@ pub fn app(state: AppState) -> Router {
         .route("/health", get(health::health_check))
         // Register GET /health/db.
         .route("/health/db", get(health::database_health_check))
+        .nest("/api/v1/admin", admin::routes())
         .nest("/api/v1/hospitals", hospitals::routes())
         .layer(DefaultBodyLimit::max(state.max_upload_bytes))
         // Add request/response tracing for all routes registered above.

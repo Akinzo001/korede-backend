@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::port::auth::{
-    AuthenticatedHospital, PasswordHashError, PasswordHasher, TokenError, TokenService,
+    AuthenticatedAdmin, AuthenticatedHospital, PasswordHashError, PasswordHasher, TokenError,
+    TokenService,
 };
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,26 @@ impl TokenService for JwtTokenService {
         .map_err(|_| TokenError::CreateFailed)
     }
 
+    fn create_admin_access_token(&self, email: &str) -> Result<String, TokenError> {
+        let now = Utc::now().timestamp();
+        let exp = now + self.expires_in_seconds;
+
+        let claims = Claims {
+            sub: "super_admin".to_owned(),
+            email: email.to_owned(),
+            role: "admin".to_owned(),
+            iat: now as usize,
+            exp: exp as usize,
+        };
+
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(self.secret.as_bytes()),
+        )
+        .map_err(|_| TokenError::CreateFailed)
+    }
+
     fn verify_access_token(&self, token: &str) -> Result<AuthenticatedHospital, TokenError> {
         let token_data = decode::<Claims>(
             token,
@@ -102,6 +123,24 @@ impl TokenService for JwtTokenService {
 
         Ok(AuthenticatedHospital {
             hospital_id,
+            email: token_data.claims.email,
+            role: token_data.claims.role,
+        })
+    }
+
+    fn verify_admin_access_token(&self, token: &str) -> Result<AuthenticatedAdmin, TokenError> {
+        let token_data = decode::<Claims>(
+            token,
+            &DecodingKey::from_secret(self.secret.as_bytes()),
+            &Validation::default(),
+        )
+        .map_err(|_| TokenError::Invalid)?;
+
+        if token_data.claims.role != "admin" {
+            return Err(TokenError::Invalid);
+        }
+
+        Ok(AuthenticatedAdmin {
             email: token_data.claims.email,
             role: token_data.claims.role,
         })
@@ -142,5 +181,28 @@ mod tests {
         assert_eq!(authenticated.hospital_id, hospital_id);
         assert_eq!(authenticated.email, "hospital@example.com");
         assert_eq!(authenticated.role, "hospital");
+    }
+
+    #[test]
+    fn jwt_service_creates_and_verifies_admin_token() {
+        let service = JwtTokenService::new("test-secret".to_owned(), 3600);
+        let token = service
+            .create_admin_access_token("admin@example.com")
+            .unwrap();
+
+        let authenticated = service.verify_admin_access_token(&token).unwrap();
+
+        assert_eq!(authenticated.email, "admin@example.com");
+        assert_eq!(authenticated.role, "admin");
+    }
+
+    #[test]
+    fn hospital_verifier_rejects_admin_token() {
+        let service = JwtTokenService::new("test-secret".to_owned(), 3600);
+        let token = service
+            .create_admin_access_token("admin@example.com")
+            .unwrap();
+
+        assert!(service.verify_access_token(&token).is_err());
     }
 }

@@ -1269,10 +1269,7 @@ mod tests {
     fn mime_validation_accepts_pdf() {
         assert!(validate_mime_type("application/pdf").is_ok());
         assert!(validate_mime_type("Pdf").is_ok());
-        assert_eq!(
-            normalized_pdf_mime_type("Pdf").unwrap(),
-            "application/pdf"
-        );
+        assert_eq!(normalized_pdf_mime_type("Pdf").unwrap(), "application/pdf");
     }
 
     #[test]

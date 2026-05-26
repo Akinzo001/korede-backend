@@ -8,6 +8,12 @@ pub struct AuthenticatedHospital {
     pub role: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthenticatedAdmin {
+    pub email: String,
+    pub role: String,
+}
+
 #[derive(Debug, Error)]
 pub enum PasswordHashError {
     #[error("failed to hash password")]
@@ -39,5 +45,9 @@ pub enum TokenError {
 pub trait TokenService: Send + Sync {
     fn create_access_token(&self, hospital_id: Uuid, email: &str) -> Result<String, TokenError>;
 
+    fn create_admin_access_token(&self, email: &str) -> Result<String, TokenError>;
+
     fn verify_access_token(&self, token: &str) -> Result<AuthenticatedHospital, TokenError>;
+
+    fn verify_admin_access_token(&self, token: &str) -> Result<AuthenticatedAdmin, TokenError>;
 }

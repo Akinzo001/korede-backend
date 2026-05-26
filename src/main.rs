@@ -139,6 +139,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         email_service,
         jwt_expires_in_seconds: config.auth.jwt_expires_in_seconds,
         max_upload_bytes: config.storage.max_upload_bytes,
+        super_admin_email: config.admin.email.clone(),
+        super_admin_password: config.admin.password.clone(),
     };
 
     // Build the Axum router.

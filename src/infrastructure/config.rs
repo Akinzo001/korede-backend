@@ -23,6 +23,9 @@ pub struct AppConfig {
     // Authentication-related settings, like JWT secret.
     pub auth: AuthConfig,
 
+    // Super-admin credentials for platform administration.
+    pub admin: AdminConfig,
+
     // Sui-related settings, like RPC URL and package ID.
     pub sui: SuiConfig,
 
@@ -71,6 +74,16 @@ pub struct AuthConfig {
 
     // Number of seconds before issued JWTs expire.
     pub jwt_expires_in_seconds: i64,
+}
+
+// Settings for the platform super-admin account.
+#[derive(Debug, Clone)]
+pub struct AdminConfig {
+    // Super-admin login email.
+    pub email: String,
+
+    // Super-admin login password.
+    pub password: String,
 }
 
 // Settings for document storage.
@@ -273,6 +286,11 @@ impl AppConfig {
                         value: optional_env("JWT_EXPIRES_IN_SECONDS")
                             .unwrap_or_else(|| "86400".to_owned()),
                     })?,
+            },
+
+            admin: AdminConfig {
+                email: required_env("SUPER_ADMIN_EMAIL")?.to_lowercase(),
+                password: required_env("SUPER_ADMIN_PASSWORD")?,
             },
 
             // Build the nested Sui config.

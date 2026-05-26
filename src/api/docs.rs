@@ -5,6 +5,7 @@ use utoipa::OpenApi;
 
 // These response structs are included as schemas in the generated API docs.
 use crate::api::{
+    admin::{AdminLoginRequest, AdminLoginResponse},
     health::{DatabaseHealthResponse, HealthResponse},
     hospitals::{
         Base64DocumentRequest, HospitalDocumentResponse, HospitalDocumentsResponse,
@@ -30,6 +31,7 @@ use crate::api::{
     paths(
         crate::api::health::health_check,
         crate::api::health::database_health_check,
+        crate::api::admin::login_admin,
         crate::api::hospitals::register_hospital,
         crate::api::hospitals::verify_hospital_email,
         crate::api::hospitals::resend_hospital_email_otp,
@@ -43,6 +45,8 @@ use crate::api::{
         schemas(
             HealthResponse,
             DatabaseHealthResponse,
+            AdminLoginRequest,
+            AdminLoginResponse,
             Base64DocumentRequest,
             RegisterHospitalRequest,
             RegisterHospitalResponse,
@@ -64,6 +68,7 @@ use crate::api::{
     // Group endpoints into named sections in Swagger UI.
     tags(
         (name = "Health", description = "Endpoints for checking whether the API and database are working."),
+        (name = "Admin", description = "Super-admin authentication and platform administration endpoints."),
         (name = "Hospitals", description = "Hospital registration, authentication, and KYC endpoints.")
     )
 )]
