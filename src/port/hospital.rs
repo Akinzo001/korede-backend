@@ -92,6 +92,8 @@ pub trait HospitalRepository: Send + Sync {
         hospital_id: Uuid,
     ) -> Result<Option<Hospital>, HospitalRepositoryError>;
 
+    async fn list_hospitals(&self) -> Result<Vec<Hospital>, HospitalRepositoryError>;
+
     async fn save_hospital_document(
         &self,
         document: NewHospitalDocument,

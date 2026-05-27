@@ -17,6 +17,7 @@ pub enum ApiError {
     BadRequest(String),
     Unauthorized(String),
     Forbidden(String),
+    NotFound(String),
     Conflict(String),
     PayloadTooLarge(String),
     UnsupportedMediaType(String),
@@ -29,6 +30,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
             Self::Forbidden(message) => (StatusCode::FORBIDDEN, message),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::PayloadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message),
             Self::UnsupportedMediaType(message) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, message),
@@ -45,7 +47,7 @@ impl From<HospitalRepositoryError> for ApiError {
             HospitalRepositoryError::DuplicateEmail => {
                 Self::Conflict("hospital email already exists".to_owned())
             }
-            HospitalRepositoryError::NotFound => Self::BadRequest("hospital not found".to_owned()),
+            HospitalRepositoryError::NotFound => Self::NotFound("hospital not found".to_owned()),
             HospitalRepositoryError::Database(error) => {
                 tracing::error!(%error, "database operation failed");
                 Self::Internal("internal server error".to_owned())

@@ -177,6 +177,40 @@ impl HospitalRepository for PostgresHospitalRepository {
             .map_err(HospitalRepositoryError::Database)
     }
 
+    async fn list_hospitals(&self) -> Result<Vec<Hospital>, HospitalRepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                name,
+                email,
+                email_verified,
+                email_verified_at,
+                password_hash,
+                phone_number,
+                official_address,
+                administrator_name,
+                cac_registration_number,
+                medical_license_number,
+                corporate_account_name,
+                corporate_account_number,
+                bank_name,
+                verification_status,
+                created_at,
+                updated_at
+            FROM hospitals
+            ORDER BY created_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter()
+            .map(hospital_from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(HospitalRepositoryError::Database)
+    }
+
     async fn save_hospital_document(
         &self,
         document: NewHospitalDocument,

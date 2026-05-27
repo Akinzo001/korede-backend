@@ -1,11 +1,31 @@
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    routing::{get, post},
+};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use uuid::Uuid;
 
-use crate::api::{AppState, error::ApiError};
+use crate::{
+    api::{AppState, error::ApiError},
+    domain::{
+        hospital::{Hospital, HospitalVerificationStatus},
+        hospital_document::HospitalDocument,
+    },
+    port::{auth::AuthenticatedAdmin, hospital::HospitalRepositoryError},
+};
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/login", post(login_admin))
+    Router::new()
+        .route("/login", post(login_admin))
+        .route("/hospitals", get(list_hospitals))
+        .route("/hospitals/:hospital_id", get(get_hospital))
+        .route(
+            "/hospitals/:hospital_id/documents",
+            get(list_hospital_documents),
+        )
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -20,6 +40,51 @@ pub struct AdminLoginResponse {
     pub token_type: String,
     pub expires_in: i64,
     pub role: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminHospitalResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub email: String,
+    pub email_verified: bool,
+    pub email_verified_at: Option<DateTime<Utc>>,
+    pub phone_number: Option<String>,
+    pub official_address: Option<String>,
+    pub administrator_name: Option<String>,
+    pub cac_registration_number: Option<String>,
+    pub medical_license_number: Option<String>,
+    pub corporate_account_name: String,
+    pub corporate_account_number: String,
+    pub bank_name: String,
+    pub verification_status: HospitalVerificationStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminHospitalsResponse {
+    pub hospitals: Vec<AdminHospitalResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminHospitalDocumentResponse {
+    pub id: Uuid,
+    pub hospital_id: Uuid,
+    pub document_type: String,
+    pub storage_provider: String,
+    pub storage_key: String,
+    pub status: String,
+    pub original_filename: String,
+    pub mime_type: String,
+    pub file_size_bytes: i64,
+    pub uploaded_at: DateTime<Utc>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminHospitalDocumentsResponse {
+    pub documents: Vec<AdminHospitalDocumentResponse>,
 }
 
 #[utoipa::path(
@@ -61,6 +126,95 @@ pub async fn login_admin(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/hospitals",
+    tag = "Admin",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "All registered hospitals.", body = AdminHospitalsResponse),
+        (status = 401, description = "Missing or invalid admin bearer token.")
+    )
+)]
+pub async fn list_hospitals(
+    _admin: AuthenticatedAdmin,
+    State(state): State<AppState>,
+) -> Result<Json<AdminHospitalsResponse>, ApiError> {
+    let hospitals = state
+        .hospital_repository
+        .list_hospitals()
+        .await?
+        .into_iter()
+        .map(AdminHospitalResponse::from)
+        .collect();
+
+    Ok(Json(AdminHospitalsResponse { hospitals }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/hospitals/{hospital_id}",
+    tag = "Admin",
+    security(("bearer_auth" = [])),
+    params(
+        ("hospital_id" = Uuid, Path, description = "Hospital ID")
+    ),
+    responses(
+        (status = 200, description = "Hospital details.", body = AdminHospitalResponse),
+        (status = 401, description = "Missing or invalid admin bearer token."),
+        (status = 404, description = "Hospital not found.")
+    )
+)]
+pub async fn get_hospital(
+    _admin: AuthenticatedAdmin,
+    State(state): State<AppState>,
+    Path(hospital_id): Path<Uuid>,
+) -> Result<Json<AdminHospitalResponse>, ApiError> {
+    let hospital = state
+        .hospital_repository
+        .find_hospital_by_id(hospital_id)
+        .await?
+        .ok_or(HospitalRepositoryError::NotFound)?;
+
+    Ok(Json(AdminHospitalResponse::from(hospital)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/hospitals/{hospital_id}/documents",
+    tag = "Admin",
+    security(("bearer_auth" = [])),
+    params(
+        ("hospital_id" = Uuid, Path, description = "Hospital ID")
+    ),
+    responses(
+        (status = 200, description = "Hospital document metadata.", body = AdminHospitalDocumentsResponse),
+        (status = 401, description = "Missing or invalid admin bearer token."),
+        (status = 404, description = "Hospital not found.")
+    )
+)]
+pub async fn list_hospital_documents(
+    _admin: AuthenticatedAdmin,
+    State(state): State<AppState>,
+    Path(hospital_id): Path<Uuid>,
+) -> Result<Json<AdminHospitalDocumentsResponse>, ApiError> {
+    state
+        .hospital_repository
+        .find_hospital_by_id(hospital_id)
+        .await?
+        .ok_or(HospitalRepositoryError::NotFound)?;
+
+    let documents = state
+        .hospital_repository
+        .list_hospital_documents(hospital_id)
+        .await?
+        .into_iter()
+        .map(AdminHospitalDocumentResponse::from)
+        .collect();
+
+    Ok(Json(AdminHospitalDocumentsResponse { documents }))
+}
+
 fn validate_admin_login_request(request: &AdminLoginRequest) -> Result<(), ApiError> {
     if request.email.trim().is_empty() || !request.email.contains('@') {
         return Err(ApiError::BadRequest("email is invalid".to_owned()));
@@ -88,6 +242,47 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     }
 
     diff == 0
+}
+
+impl From<Hospital> for AdminHospitalResponse {
+    fn from(hospital: Hospital) -> Self {
+        Self {
+            id: hospital.id,
+            name: hospital.name,
+            email: hospital.email,
+            email_verified: hospital.email_verified,
+            email_verified_at: hospital.email_verified_at,
+            phone_number: hospital.phone_number,
+            official_address: hospital.official_address,
+            administrator_name: hospital.administrator_name,
+            cac_registration_number: hospital.cac_registration_number,
+            medical_license_number: hospital.medical_license_number,
+            corporate_account_name: hospital.corporate_account_name,
+            corporate_account_number: hospital.corporate_account_number,
+            bank_name: hospital.bank_name,
+            verification_status: hospital.verification_status,
+            created_at: hospital.created_at,
+            updated_at: hospital.updated_at,
+        }
+    }
+}
+
+impl From<HospitalDocument> for AdminHospitalDocumentResponse {
+    fn from(document: HospitalDocument) -> Self {
+        Self {
+            id: document.id,
+            hospital_id: document.hospital_id,
+            document_type: document.document_type.as_str().to_owned(),
+            storage_provider: document.storage_provider.as_str().to_owned(),
+            storage_key: document.storage_key,
+            status: document.status.as_str().to_owned(),
+            original_filename: document.original_filename,
+            mime_type: document.mime_type,
+            file_size_bytes: document.file_size_bytes,
+            uploaded_at: document.uploaded_at,
+            reviewed_at: document.reviewed_at,
+        }
+    }
 }
 
 #[cfg(test)]
