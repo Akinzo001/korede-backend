@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::{get, post},
+    routing::get,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,6 @@ use crate::{
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/login", post(login_admin))
         .route("/hospitals", get(list_hospitals))
         .route("/hospitals/:hospital_id", get(get_hospital))
         .route(
@@ -87,17 +86,6 @@ pub struct AdminHospitalDocumentsResponse {
     pub documents: Vec<AdminHospitalDocumentResponse>,
 }
 
-#[utoipa::path(
-    post,
-    path = "/api/v1/admin/login",
-    tag = "Admin",
-    request_body = AdminLoginRequest,
-    responses(
-        (status = 200, description = "Super-admin authenticated successfully.", body = AdminLoginResponse),
-        (status = 400, description = "Invalid login request."),
-        (status = 401, description = "Invalid admin credentials.")
-    )
-)]
 pub async fn login_admin(
     State(state): State<AppState>,
     Json(request): Json<AdminLoginRequest>,

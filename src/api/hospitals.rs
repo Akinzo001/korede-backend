@@ -36,8 +36,6 @@ pub fn routes() -> Router<AppState> {
         .route("/register", post(register_hospital))
         .route("/verify-email", post(verify_hospital_email))
         .route("/resend-otp", post(resend_hospital_email_otp))
-        .route("/login", post(login_hospital))
-        .route("/login/verify-otp", post(verify_login_otp))
         .route("/me", get(current_hospital))
         .route("/documents", get(list_documents))
 }
@@ -541,16 +539,6 @@ pub async fn resend_hospital_email_otp(
     }))
 }
 
-#[utoipa::path(
-    post,
-    path = "/api/v1/hospitals/login",
-    tag = "Hospitals",
-    request_body = LoginHospitalRequest,
-    responses(
-        (status = 200, description = "Password accepted and login OTP sent.", body = LoginHospitalResponse),
-        (status = 401, description = "Invalid email or password.")
-    )
-)]
 pub async fn login_hospital(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -704,16 +692,6 @@ pub async fn login_hospital(
     }))
 }
 
-#[utoipa::path(
-    post,
-    path = "/api/v1/hospitals/login/verify-otp",
-    tag = "Hospitals",
-    request_body = VerifyLoginOtpRequest,
-    responses(
-        (status = 200, description = "Hospital logged in successfully.", body = VerifyLoginOtpResponse),
-        (status = 400, description = "Invalid or expired OTP.")
-    )
-)]
 pub async fn verify_login_otp(
     State(state): State<AppState>,
     headers: HeaderMap,

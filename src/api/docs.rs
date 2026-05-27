@@ -7,15 +7,16 @@ use utoipa::OpenApi;
 use crate::api::{
     admin::{
         AdminHospitalDocumentResponse, AdminHospitalDocumentsResponse, AdminHospitalResponse,
-        AdminHospitalsResponse, AdminLoginRequest, AdminLoginResponse,
+        AdminHospitalsResponse,
     },
+    auth::{LoginRequest, LoginResponse},
     health::{DatabaseHealthResponse, HealthResponse},
     hospitals::{
         Base64DocumentRequest, HospitalDocumentResponse, HospitalDocumentsResponse,
-        HospitalResponse, HospitalSummaryResponse, LoginHospitalRequest, LoginHospitalResponse,
-        RegisterHospitalRequest, RegisterHospitalResponse, ResendHospitalEmailOtpRequest,
-        ResendHospitalEmailOtpResponse, VerifyHospitalEmailRequest, VerifyHospitalEmailResponse,
-        VerifyLoginOtpRequest, VerifyLoginOtpResponse,
+        HospitalResponse, HospitalSummaryResponse, RegisterHospitalRequest,
+        RegisterHospitalResponse, ResendHospitalEmailOtpRequest, ResendHospitalEmailOtpResponse,
+        VerifyHospitalEmailRequest, VerifyHospitalEmailResponse, VerifyLoginOtpRequest,
+        VerifyLoginOtpResponse,
     },
 };
 
@@ -34,15 +35,14 @@ use crate::api::{
     paths(
         crate::api::health::health_check,
         crate::api::health::database_health_check,
-        crate::api::admin::login_admin,
+        crate::api::auth::login,
+        crate::api::auth::verify_login_otp,
         crate::api::admin::list_hospitals,
         crate::api::admin::get_hospital,
         crate::api::admin::list_hospital_documents,
         crate::api::hospitals::register_hospital,
         crate::api::hospitals::verify_hospital_email,
         crate::api::hospitals::resend_hospital_email_otp,
-        crate::api::hospitals::login_hospital,
-        crate::api::hospitals::verify_login_otp,
         crate::api::hospitals::current_hospital,
         crate::api::hospitals::list_documents
     ),
@@ -51,8 +51,8 @@ use crate::api::{
         schemas(
             HealthResponse,
             DatabaseHealthResponse,
-            AdminLoginRequest,
-            AdminLoginResponse,
+            LoginRequest,
+            LoginResponse,
             AdminHospitalResponse,
             AdminHospitalsResponse,
             AdminHospitalDocumentResponse,
@@ -65,8 +65,6 @@ use crate::api::{
             ResendHospitalEmailOtpRequest,
             ResendHospitalEmailOtpResponse,
             HospitalResponse,
-            LoginHospitalRequest,
-            LoginHospitalResponse,
             VerifyLoginOtpRequest,
             VerifyLoginOtpResponse,
             HospitalSummaryResponse,
@@ -78,6 +76,7 @@ use crate::api::{
     // Group endpoints into named sections in Swagger UI.
     tags(
         (name = "Health", description = "Endpoints for checking whether the API and database are working."),
+        (name = "Auth", description = "Centralized login endpoints for platform admins and hospitals."),
         (name = "Admin", description = "Super-admin authentication and platform administration endpoints."),
         (name = "Hospitals", description = "Hospital registration, authentication, and KYC endpoints.")
     )
