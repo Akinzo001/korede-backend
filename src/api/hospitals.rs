@@ -246,7 +246,7 @@ pub async fn register_hospital(
         hospital.id,
         HospitalDocumentType::CacCertificate,
         &request.cac_document,
-        normalized_pdf_mime_type(&request.cac_document.mime_type)?,
+        normalized_document_mime_type(&request.cac_document.mime_type)?,
         &cac_document,
     )
     .await?;
@@ -256,7 +256,7 @@ pub async fn register_hospital(
         hospital.id,
         HospitalDocumentType::MedicalLicense,
         &request.medical_license_document,
-        normalized_pdf_mime_type(&request.medical_license_document.mime_type)?,
+        normalized_document_mime_type(&request.medical_license_document.mime_type)?,
         &medical_license_document,
     )
     .await?;
@@ -1070,14 +1070,17 @@ async fn store_registration_document(
 }
 
 fn validate_mime_type(mime_type: &str) -> Result<(), ApiError> {
-    normalized_pdf_mime_type(mime_type).map(|_| ())
+    normalized_document_mime_type(mime_type).map(|_| ())
 }
 
-fn normalized_pdf_mime_type(mime_type: &str) -> Result<&'static str, ApiError> {
+fn normalized_document_mime_type(mime_type: &str) -> Result<&'static str, ApiError> {
     match mime_type.trim().to_ascii_lowercase().as_str() {
         "application/pdf" | "application/x-pdf" | "pdf" => Ok("application/pdf"),
+        "image/jpeg" | "image/jpg" | "jpeg" | "jpg" => Ok("image/jpeg"),
+        "image/png" | "png" => Ok("image/png"),
+        "image/webp" | "webp" => Ok("image/webp"),
         _ => Err(ApiError::UnsupportedMediaType(
-            "only PDF files are supported".to_owned(),
+            "only PDF, JPEG, PNG, and WebP files are supported".to_owned(),
         )),
     }
 }
@@ -1250,22 +1253,22 @@ mod tests {
     }
 
     #[test]
-    fn mime_validation_accepts_pdf() {
+    fn mime_validation_accepts_supported_document_types() {
         assert!(validate_mime_type("application/pdf").is_ok());
         assert!(validate_mime_type("Pdf").is_ok());
-        assert_eq!(normalized_pdf_mime_type("Pdf").unwrap(), "application/pdf");
+        assert!(validate_mime_type("image/jpeg").is_ok());
+        assert!(validate_mime_type("JPG").is_ok());
+        assert!(validate_mime_type("image/png").is_ok());
+        assert!(validate_mime_type("webp").is_ok());
+        assert_eq!(
+            normalized_document_mime_type("Pdf").unwrap(),
+            "application/pdf"
+        );
+        assert_eq!(normalized_document_mime_type("JPG").unwrap(), "image/jpeg");
     }
 
     #[test]
     fn mime_validation_rejects_unsupported_types() {
-        assert!(matches!(
-            validate_mime_type("image/jpeg"),
-            Err(ApiError::UnsupportedMediaType(_))
-        ));
-        assert!(matches!(
-            validate_mime_type("image/png"),
-            Err(ApiError::UnsupportedMediaType(_))
-        ));
         assert!(matches!(
             validate_mime_type("text/plain"),
             Err(ApiError::UnsupportedMediaType(_))
