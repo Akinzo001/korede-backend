@@ -7,6 +7,7 @@ pub mod error;
 // Expose the health-check routes module.
 pub mod health;
 pub mod hospitals;
+pub mod tokens;
 
 // `Router` is Axum's route collection type.
 // `routing::get` is a helper for registering GET endpoints.
@@ -30,6 +31,7 @@ use crate::port::{
     auth::{PasswordHasher, TokenService},
     email::EmailService,
     hospital::HospitalRepository,
+    refresh_token::RefreshTokenRepository,
     storage::DocumentStorage,
 };
 
@@ -44,11 +46,13 @@ pub struct AppState {
     pub db_pool: PgPool,
 
     pub hospital_repository: Arc<dyn HospitalRepository>,
+    pub refresh_token_repository: Arc<dyn RefreshTokenRepository>,
     pub password_hasher: Arc<dyn PasswordHasher>,
     pub token_service: Arc<dyn TokenService>,
     pub document_storage: Arc<dyn DocumentStorage>,
     pub email_service: Arc<dyn EmailService>,
     pub jwt_expires_in_seconds: i64,
+    pub refresh_token_expires_in_seconds: i64,
     pub max_upload_bytes: usize,
     pub super_admin_email: String,
     pub super_admin_password: String,

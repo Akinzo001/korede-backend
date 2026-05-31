@@ -15,3 +15,6 @@ pub mod medical_case;
 
 // Patient domain model.
 pub mod patient;
+
+// Stored refresh-token session model.
+pub mod refresh_token;

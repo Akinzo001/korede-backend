@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    api::{AppState, error::ApiError},
+    api::{AppState, error::ApiError, tokens::issue_refresh_token},
     domain::{
         hospital::{Hospital, HospitalVerificationStatus},
         hospital_document::{HospitalDocument, HospitalDocumentType},
@@ -145,8 +145,10 @@ pub struct VerifyLoginOtpRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct VerifyLoginOtpResponse {
     pub access_token: String,
+    pub refresh_token: String,
     pub token_type: String,
     pub expires_in: i64,
+    pub refresh_expires_in: i64,
     pub dashboard_access: String,
     pub hospital: HospitalSummaryResponse,
 }
@@ -793,6 +795,8 @@ pub async fn verify_login_otp(
         .token_service
         .create_access_token(hospital.id, &hospital.email)
         .map_err(|_| ApiError::Internal("failed to create access token".to_owned()))?;
+    let refresh_token =
+        issue_refresh_token(&state, hospital.id.to_string(), &hospital.email, "hospital").await?;
 
     audit_hospital_event(
         &state,
@@ -808,8 +812,10 @@ pub async fn verify_login_otp(
 
     Ok(Json(VerifyLoginOtpResponse {
         access_token,
+        refresh_token,
         token_type: "Bearer".to_owned(),
         expires_in: state.jwt_expires_in_seconds,
+        refresh_expires_in: state.refresh_token_expires_in_seconds,
         dashboard_access: dashboard_access_for(&hospital).to_owned(),
         hospital: HospitalSummaryResponse::from(&hospital),
     }))

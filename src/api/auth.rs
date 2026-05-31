@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode, request::Parts},
     routing::post,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -12,7 +13,9 @@ use crate::{
     api::{
         AppState,
         hospitals::{self, LoginHospitalRequest, VerifyLoginOtpRequest, VerifyLoginOtpResponse},
+        tokens::{hash_refresh_token, issue_refresh_token},
     },
+    domain::hospital::HospitalVerificationStatus,
     port::auth::{AuthenticatedAdmin, AuthenticatedHospital},
 };
 
@@ -22,6 +25,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
         .route("/login/verify-otp", post(verify_login_otp))
+        .route("/refresh", post(refresh_token))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -35,12 +39,29 @@ pub struct LoginResponse {
     pub role: String,
     pub token_type: Option<String>,
     pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
     pub expires_in: Option<i64>,
+    pub refresh_expires_in: Option<i64>,
     pub otp_required: bool,
     pub login_challenge_id: Option<Uuid>,
     pub email: Option<String>,
     pub otp_expires_in_seconds: Option<i64>,
     pub message: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RefreshTokenRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RefreshTokenResponse {
+    pub role: String,
+    pub token_type: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: i64,
+    pub refresh_expires_in: i64,
 }
 
 #[utoipa::path(
@@ -73,12 +94,21 @@ pub async fn login(
             .token_service
             .create_admin_access_token(&state.super_admin_email)
             .map_err(|_| ApiError::Internal("failed to create access token".to_owned()))?;
+        let refresh_token = issue_refresh_token(
+            &state,
+            "super_admin".to_owned(),
+            &state.super_admin_email,
+            "admin",
+        )
+        .await?;
 
         return Ok(Json(LoginResponse {
             role: "admin".to_owned(),
             token_type: Some("Bearer".to_owned()),
             access_token: Some(access_token),
+            refresh_token: Some(refresh_token),
             expires_in: Some(state.jwt_expires_in_seconds),
+            refresh_expires_in: Some(state.refresh_token_expires_in_seconds),
             otp_required: false,
             login_challenge_id: None,
             email: Some(state.super_admin_email.clone()),
@@ -102,7 +132,9 @@ pub async fn login(
         role: "hospital".to_owned(),
         token_type: None,
         access_token: None,
+        refresh_token: None,
         expires_in: None,
+        refresh_expires_in: None,
         otp_required: hospital_login.otp_required,
         login_challenge_id: Some(hospital_login.login_challenge_id),
         email: Some(hospital_login.email),
@@ -127,6 +159,120 @@ pub async fn verify_login_otp(
     Json(request): Json<VerifyLoginOtpRequest>,
 ) -> Result<Json<VerifyLoginOtpResponse>, ApiError> {
     hospitals::verify_login_otp(State(state), headers, Json(request)).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/refresh",
+    tag = "Auth",
+    request_body = RefreshTokenRequest,
+    responses(
+        (status = 200, description = "Access token refreshed and refresh token rotated.", body = RefreshTokenResponse),
+        (status = 400, description = "Invalid refresh request."),
+        (status = 401, description = "Invalid or expired refresh token.")
+    )
+)]
+pub async fn refresh_token(
+    State(state): State<AppState>,
+    Json(request): Json<RefreshTokenRequest>,
+) -> Result<Json<RefreshTokenResponse>, ApiError> {
+    let raw_refresh_token = request.refresh_token.trim();
+    if raw_refresh_token.is_empty() {
+        return Err(ApiError::BadRequest("refresh token is required".to_owned()));
+    }
+
+    let token_hash = hash_refresh_token(raw_refresh_token);
+    let stored_token = state
+        .refresh_token_repository
+        .find_refresh_token_by_hash(&token_hash)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to load refresh token");
+            ApiError::Internal("internal server error".to_owned())
+        })?
+        .ok_or_else(invalid_refresh_token)?;
+
+    if stored_token.revoked_at.is_some() || stored_token.expires_at <= Utc::now() {
+        return Err(invalid_refresh_token());
+    }
+
+    let (access_token, subject_id, email, role) = match stored_token.role.as_str() {
+        "admin" => {
+            if stored_token.email != state.super_admin_email
+                || stored_token.subject_id != "super_admin"
+            {
+                return Err(invalid_refresh_token());
+            }
+
+            let access_token = state
+                .token_service
+                .create_admin_access_token(&state.super_admin_email)
+                .map_err(|_| ApiError::Internal("failed to create access token".to_owned()))?;
+
+            (
+                access_token,
+                "super_admin".to_owned(),
+                state.super_admin_email.clone(),
+                "admin".to_owned(),
+            )
+        }
+        "hospital" => {
+            let hospital_id =
+                Uuid::parse_str(&stored_token.subject_id).map_err(|_| invalid_refresh_token())?;
+            let hospital = state
+                .hospital_repository
+                .find_hospital_by_id(hospital_id)
+                .await?
+                .ok_or_else(invalid_refresh_token)?;
+
+            if !hospital.email_verified {
+                return Err(invalid_refresh_token());
+            }
+
+            match hospital.verification_status {
+                HospitalVerificationStatus::Rejected | HospitalVerificationStatus::Suspended => {
+                    return Err(invalid_refresh_token());
+                }
+                HospitalVerificationStatus::Pending | HospitalVerificationStatus::Verified => {}
+            }
+
+            let access_token = state
+                .token_service
+                .create_access_token(hospital.id, &hospital.email)
+                .map_err(|_| ApiError::Internal("failed to create access token".to_owned()))?;
+
+            (
+                access_token,
+                hospital.id.to_string(),
+                hospital.email,
+                "hospital".to_owned(),
+            )
+        }
+        _ => return Err(invalid_refresh_token()),
+    };
+
+    let revoked = state
+        .refresh_token_repository
+        .revoke_refresh_token(stored_token.id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to revoke refresh token");
+            ApiError::Internal("internal server error".to_owned())
+        })?;
+    if !revoked {
+        return Err(invalid_refresh_token());
+    }
+
+    let new_refresh_token = issue_refresh_token(&state, subject_id, &email, &role).await?;
+
+    Ok(Json(RefreshTokenResponse {
+        role,
+        token_type: "Bearer".to_owned(),
+        access_token,
+        refresh_token: new_refresh_token,
+        expires_in: state.jwt_expires_in_seconds,
+        refresh_expires_in: state.refresh_token_expires_in_seconds,
+    }))
 }
 
 #[async_trait]
@@ -197,6 +343,10 @@ fn validate_login_request(request: &LoginRequest) -> Result<(), ApiError> {
 
 fn invalid_credentials() -> ApiError {
     ApiError::Unauthorized("invalid email or password".to_owned())
+}
+
+fn invalid_refresh_token() -> ApiError {
+    ApiError::Unauthorized("invalid or expired refresh token".to_owned())
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

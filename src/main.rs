@@ -13,6 +13,7 @@ use korede_backend::{
         db::{
             hospital_repository::PostgresHospitalRepository,
             postgres::{connect, run_migrations},
+            refresh_token_repository::PostgresRefreshTokenRepository,
         },
         email::{BrevoEmailService, DisabledEmailService},
         storage::{BackblazeDocumentStorage, LocalDocumentStorage},
@@ -110,6 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This moves ownership of `db_pool` into `AppState`.
     // That is fine because from this point onward the router owns the state.
     let hospital_repository = Arc::new(PostgresHospitalRepository::new(db_pool.clone()));
+    let refresh_token_repository = Arc::new(PostgresRefreshTokenRepository::new(db_pool.clone()));
     let password_hasher = Arc::new(Argon2PasswordHasher);
     let token_service = Arc::new(JwtTokenService::new(
         config.auth.jwt_secret.clone(),
@@ -133,11 +135,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         db_pool,
         hospital_repository,
+        refresh_token_repository,
         password_hasher,
         token_service,
         document_storage,
         email_service,
         jwt_expires_in_seconds: config.auth.jwt_expires_in_seconds,
+        refresh_token_expires_in_seconds: config.auth.refresh_token_expires_in_seconds,
         max_upload_bytes: config.storage.max_upload_bytes,
         super_admin_email: config.admin.email.clone(),
         super_admin_password: config.admin.password.clone(),
