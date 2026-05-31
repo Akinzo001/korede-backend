@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::{
-    infrastructure::config::{BrevoConfig, EmailConfig},
+    infrastructure::config::{BrevoConfig, EmailConfig, ResendConfig},
     port::email::{EmailError, EmailMessage, EmailService},
 };
 
@@ -16,6 +16,13 @@ pub struct BrevoEmailService {
     api_key: String,
     from_email: String,
     from_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResendEmailService {
+    client: Client,
+    api_key: String,
+    from: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,6 +41,17 @@ struct BrevoContact {
     email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResendSendEmailRequest {
+    from: String,
+    to: Vec<String>,
+    subject: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html: Option<String>,
 }
 
 impl BrevoEmailService {
@@ -56,6 +74,31 @@ impl BrevoEmailService {
                 .from_name
                 .clone()
                 .unwrap_or_else(|| "Korede Health".to_owned()),
+        })
+    }
+}
+
+impl ResendEmailService {
+    pub fn from_config(config: &EmailConfig, resend: &ResendConfig) -> Result<Self, EmailError> {
+        let api_key = resend
+            .api_key
+            .clone()
+            .ok_or(EmailError::MissingConfig("RESEND_API_KEY"))?;
+
+        let from_email = config
+            .from_email
+            .clone()
+            .ok_or(EmailError::MissingConfig("EMAIL_FROM_ADDRESS"))?;
+
+        let from = match config.from_name.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => format!("{name} <{from_email}>"),
+            _ => from_email,
+        };
+
+        Ok(Self {
+            client: Client::new(),
+            api_key,
+            from,
         })
     }
 }
@@ -103,6 +146,43 @@ impl EmailService for BrevoEmailService {
 
             return Err(EmailError::Provider(format!(
                 "Brevo returned status {status}"
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EmailService for ResendEmailService {
+    async fn send(&self, message: EmailMessage) -> Result<(), EmailError> {
+        let request = ResendSendEmailRequest {
+            from: self.from.clone(),
+            to: vec![message.to_email],
+            subject: message.subject,
+            text: Some(message.text_body),
+            html: message.html_body,
+        };
+
+        let response = self
+            .client
+            .post("https://api.resend.com/emails")
+            .bearer_auth(&self.api_key)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "failed to call Resend email API");
+                EmailError::SendFailed
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::error!(%status, %body, "Resend email API rejected request");
+
+            return Err(EmailError::Provider(format!(
+                "Resend returned status {status}"
             )));
         }
 

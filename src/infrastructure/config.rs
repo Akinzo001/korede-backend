@@ -137,6 +137,7 @@ pub struct EmailConfig {
     // Supported values:
     // - disabled
     // - brevo
+    // - resend
     pub provider: String,
 
     // Email address used as the sender.
@@ -147,12 +148,22 @@ pub struct EmailConfig {
 
     // Brevo-specific settings.
     pub brevo: BrevoConfig,
+
+    // Resend-specific settings.
+    pub resend: ResendConfig,
 }
 
 // Settings for Brevo's transactional email API.
 #[derive(Debug, Clone)]
 pub struct BrevoConfig {
     // Brevo SMTP/API key.
+    pub api_key: Option<String>,
+}
+
+// Settings for Resend's transactional email API.
+#[derive(Debug, Clone)]
+pub struct ResendConfig {
+    // Resend API key.
     pub api_key: Option<String>,
 }
 
@@ -334,8 +345,9 @@ impl AppConfig {
             },
 
             storage: {
-                let provider =
-                    optional_env("STORAGE_PROVIDER").unwrap_or_else(|| "local".to_owned());
+                let provider = optional_env("STORAGE_PROVIDER")
+                    .unwrap_or_else(|| "local".to_owned())
+                    .to_ascii_lowercase();
 
                 if provider != "local" && provider != "backblaze" {
                     return Err(ConfigError::UnsupportedStorageProvider(provider));
@@ -365,10 +377,11 @@ impl AppConfig {
             },
 
             email: {
-                let provider =
-                    optional_env("EMAIL_PROVIDER").unwrap_or_else(|| "disabled".to_owned());
+                let provider = optional_env("EMAIL_PROVIDER")
+                    .unwrap_or_else(|| "disabled".to_owned())
+                    .to_ascii_lowercase();
 
-                if provider != "disabled" && provider != "brevo" {
+                if provider != "disabled" && provider != "brevo" && provider != "resend" {
                     return Err(ConfigError::UnsupportedEmailProvider(provider));
                 }
 
@@ -378,6 +391,9 @@ impl AppConfig {
                     from_name: optional_env("EMAIL_FROM_NAME"),
                     brevo: BrevoConfig {
                         api_key: optional_env("BREVO_API_KEY"),
+                    },
+                    resend: ResendConfig {
+                        api_key: optional_env("RESEND_API_KEY"),
                     },
                 }
             },

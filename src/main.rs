@@ -15,7 +15,7 @@ use korede_backend::{
             postgres::{connect, run_migrations},
             refresh_token_repository::PostgresRefreshTokenRepository,
         },
-        email::{BrevoEmailService, DisabledEmailService},
+        email::{BrevoEmailService, DisabledEmailService, ResendEmailService},
         storage::{BackblazeDocumentStorage, LocalDocumentStorage},
     },
 
@@ -128,6 +128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "brevo" => Arc::new(BrevoEmailService::from_config(
             &config.email,
             &config.email.brevo,
+        )?) as Arc<dyn korede_backend::port::email::EmailService>,
+        "resend" => Arc::new(ResendEmailService::from_config(
+            &config.email,
+            &config.email.resend,
         )?) as Arc<dyn korede_backend::port::email::EmailService>,
         _ => Arc::new(DisabledEmailService) as Arc<dyn korede_backend::port::email::EmailService>,
     };

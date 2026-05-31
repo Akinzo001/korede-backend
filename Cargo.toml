@@ -1,7 +1,11 @@
 [package]
 name = "korede_backend"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[[bin]]
+name = "korede_backend_server"
+path = "src/main.rs"
 
 [dependencies]
 # Web framework
