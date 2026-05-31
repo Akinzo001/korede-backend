@@ -74,6 +74,9 @@ pub struct AuthConfig {
 
     // Number of seconds before issued JWTs expire.
     pub jwt_expires_in_seconds: i64,
+
+    // Number of seconds before issued refresh tokens expire.
+    pub refresh_token_expires_in_seconds: i64,
 }
 
 // Settings for the platform super-admin account.
@@ -202,12 +205,12 @@ pub enum ConfigError {
     #[error("missing required environment variable: {0}")]
     MissingVariable(&'static str),
 
-    // This error is used when APP_PORT exists but is not a valid number.
-    #[error("APP_PORT must be a valid port number, got: {0}")]
+    // This error is used when APP_PORT/PORT exists but is not a valid number.
+    #[error("APP_PORT or PORT must be a valid port number, got: {0}")]
     InvalidPort(String),
 
-    // This error is used when APP_HOST + APP_PORT cannot become a SocketAddr.
-    #[error("APP_HOST and APP_PORT must form a valid socket address, got: {0}")]
+    // This error is used when APP_HOST + APP_PORT/PORT cannot become a SocketAddr.
+    #[error("APP_HOST and APP_PORT/PORT must form a valid socket address, got: {0}")]
     InvalidSocketAddress(String),
 
     // This error is used when a numeric environment variable is invalid.
@@ -248,23 +251,27 @@ impl AppConfig {
             server: ServerConfig {
                 // Read APP_HOST if it exists.
                 //
-                // If APP_HOST is missing or empty, use 127.0.0.1.
-                host: optional_env("APP_HOST").unwrap_or_else(|| "127.0.0.1".to_owned()),
+                // If APP_HOST is missing or empty, bind all interfaces.
+                //
+                // Render and most cloud platforms require 0.0.0.0, not 127.0.0.1.
+                // Local development can still override this with APP_HOST=127.0.0.1.
+                host: optional_env("APP_HOST").unwrap_or_else(|| "0.0.0.0".to_owned()),
 
                 // Read APP_PORT if it exists.
                 //
-                // If APP_PORT is missing or empty, use "4000".
+                // Render provides PORT, so use it when APP_PORT is missing.
+                //
+                // If both APP_PORT and PORT are missing or empty, use "4000".
                 // Then parse the string into a u16 number.
-                port: optional_env("APP_PORT")
-                    .unwrap_or_else(|| "4000".to_owned())
-                    .parse()
-                    .map_err(|_| {
-                        // If parsing fails, convert that parsing failure
-                        // into our own ConfigError::InvalidPort.
-                        ConfigError::InvalidPort(
-                            optional_env("APP_PORT").unwrap_or_else(|| "4000".to_owned()),
-                        )
-                    })?,
+                port: {
+                    let raw_port = optional_env("APP_PORT")
+                        .or_else(|| optional_env("PORT"))
+                        .unwrap_or_else(|| "4000".to_owned());
+
+                    raw_port
+                        .parse()
+                        .map_err(|_| ConfigError::InvalidPort(raw_port))?
+                },
             },
 
             // Build the nested database config.
@@ -285,6 +292,14 @@ impl AppConfig {
                         key: "JWT_EXPIRES_IN_SECONDS",
                         value: optional_env("JWT_EXPIRES_IN_SECONDS")
                             .unwrap_or_else(|| "86400".to_owned()),
+                    })?,
+                refresh_token_expires_in_seconds: optional_env("REFRESH_TOKEN_EXPIRES_IN_SECONDS")
+                    .unwrap_or_else(|| "2592000".to_owned())
+                    .parse()
+                    .map_err(|_| ConfigError::InvalidNumber {
+                        key: "REFRESH_TOKEN_EXPIRES_IN_SECONDS",
+                        value: optional_env("REFRESH_TOKEN_EXPIRES_IN_SECONDS")
+                            .unwrap_or_else(|| "2592000".to_owned()),
                     })?,
             },
 
