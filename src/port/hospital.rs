@@ -7,6 +7,7 @@ use crate::domain::{
     hospital_document::{HospitalDocument, HospitalDocumentType},
     hospital_email_otp::HospitalEmailOtp,
     hospital_login_otp::HospitalLoginOtp,
+    hospital_password_reset_otp::HospitalPasswordResetOtp,
 };
 
 #[derive(Debug, Clone)]
@@ -45,6 +46,14 @@ pub struct NewHospitalEmailOtp {
 
 #[derive(Debug, Clone)]
 pub struct NewHospitalLoginOtp {
+    pub hospital_id: Uuid,
+    pub email: String,
+    pub otp_hash: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewHospitalPasswordResetOtp {
     pub hospital_id: Uuid,
     pub email: String,
     pub otp_hash: String,
@@ -156,6 +165,42 @@ pub trait HospitalRepository: Send + Sync {
     async fn invalidate_active_login_otps(
         &self,
         hospital_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError>;
+
+    async fn create_password_reset_otp(
+        &self,
+        otp: NewHospitalPasswordResetOtp,
+    ) -> Result<HospitalPasswordResetOtp, HospitalRepositoryError>;
+
+    async fn find_latest_password_reset_otp(
+        &self,
+        email: &str,
+    ) -> Result<Option<HospitalPasswordResetOtp>, HospitalRepositoryError>;
+
+    async fn increment_password_reset_otp_attempts(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError>;
+
+    async fn mark_password_reset_otp_used(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError>;
+
+    async fn invalidate_active_password_reset_otps(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError>;
+
+    async fn latest_password_reset_otp_created_at(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, HospitalRepositoryError>;
+
+    async fn update_hospital_password(
+        &self,
+        hospital_id: Uuid,
+        password_hash: String,
     ) -> Result<(), HospitalRepositoryError>;
 
     async fn save_audit_log(

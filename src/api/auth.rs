@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode, request::Parts},
     routing::post,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -16,7 +16,12 @@ use crate::{
         tokens::{hash_refresh_token, issue_refresh_token},
     },
     domain::hospital::HospitalVerificationStatus,
-    port::auth::{AuthenticatedAdmin, AuthenticatedHospital},
+    port::{
+        auth::{AuthenticatedAdmin, AuthenticatedHospital},
+        email::EmailMessage,
+        hospital::NewHospitalPasswordResetOtp,
+        patient::NewPatientPasswordResetOtp,
+    },
 };
 
 use super::error::ApiError;
@@ -26,7 +31,14 @@ pub fn routes() -> Router<AppState> {
         .route("/login", post(login))
         .route("/login/verify-otp", post(verify_login_otp))
         .route("/refresh", post(refresh_token))
+        .route("/forgot-password", post(request_password_reset))
+        .route("/reset-password", post(reset_password))
 }
+
+const PASSWORD_RESET_OTP_LENGTH: usize = 6;
+const PASSWORD_RESET_OTP_EXPIRES_IN_SECONDS: i64 = 300;
+const PASSWORD_RESET_OTP_MAX_ATTEMPTS: i32 = 5;
+const PASSWORD_RESET_OTP_RESEND_COOLDOWN_SECONDS: i64 = 60;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
@@ -62,6 +74,35 @@ pub struct RefreshTokenResponse {
     pub refresh_token: String,
     pub expires_in: i64,
     pub refresh_expires_in: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ForgotPasswordRequest {
+    pub role: String,
+    pub email: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ForgotPasswordResponse {
+    pub role: String,
+    pub email: String,
+    pub otp_expires_in_seconds: i64,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ResetPasswordRequest {
+    pub role: String,
+    pub email: String,
+    pub otp: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ResetPasswordResponse {
+    pub role: String,
+    pub email: String,
+    pub message: String,
 }
 
 #[utoipa::path(
@@ -275,6 +316,70 @@ pub async fn refresh_token(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/forgot-password",
+    tag = "Auth",
+    request_body = ForgotPasswordRequest,
+    responses(
+        (status = 200, description = "Password reset OTP request accepted.", body = ForgotPasswordResponse),
+        (status = 400, description = "Invalid role or email.")
+    )
+)]
+pub async fn request_password_reset(
+    State(state): State<AppState>,
+    Json(request): Json<ForgotPasswordRequest>,
+) -> Result<Json<ForgotPasswordResponse>, ApiError> {
+    let role = normalize_password_reset_role(&request.role)?;
+    let email = normalize_email(&request.email)?;
+
+    match role.as_str() {
+        "hospital" => request_hospital_password_reset(&state, &email).await?,
+        "patient" => request_patient_password_reset(&state, &email).await?,
+        _ => unreachable!(),
+    }
+
+    Ok(Json(ForgotPasswordResponse {
+        role,
+        email,
+        otp_expires_in_seconds: PASSWORD_RESET_OTP_EXPIRES_IN_SECONDS,
+        message: "If an account exists for this email, a password reset OTP has been sent."
+            .to_owned(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/reset-password",
+    tag = "Auth",
+    request_body = ResetPasswordRequest,
+    responses(
+        (status = 200, description = "Password reset successfully.", body = ResetPasswordResponse),
+        (status = 400, description = "Invalid request, OTP, or password.")
+    )
+)]
+pub async fn reset_password(
+    State(state): State<AppState>,
+    Json(request): Json<ResetPasswordRequest>,
+) -> Result<Json<ResetPasswordResponse>, ApiError> {
+    let role = normalize_password_reset_role(&request.role)?;
+    let email = normalize_email(&request.email)?;
+    validate_password_reset_otp(&request.otp)?;
+    validate_new_password(&role, &request.new_password)?;
+
+    match role.as_str() {
+        "hospital" => reset_hospital_password(&state, &email, &request.otp, &request.new_password).await?,
+        "patient" => reset_patient_password(&state, &email, &request.otp, &request.new_password).await?,
+        _ => unreachable!(),
+    }
+
+    Ok(Json(ResetPasswordResponse {
+        role,
+        email,
+        message: "Password reset successfully.".to_owned(),
+    }))
+}
+
 #[async_trait]
 impl FromRequestParts<AppState> for AuthenticatedHospital {
     type Rejection = ApiError;
@@ -341,12 +446,313 @@ fn validate_login_request(request: &LoginRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
+async fn request_hospital_password_reset(state: &AppState, email: &str) -> Result<(), ApiError> {
+    let Some(hospital) = state.hospital_repository.find_hospital_by_email(email).await? else {
+        return Ok(());
+    };
+
+    if let Some(created_at) = state
+        .hospital_repository
+        .latest_password_reset_otp_created_at(hospital.id)
+        .await?
+    {
+        let next_allowed_at =
+            created_at + Duration::seconds(PASSWORD_RESET_OTP_RESEND_COOLDOWN_SECONDS);
+        if next_allowed_at > Utc::now() {
+            return Ok(());
+        }
+    }
+
+    let otp = generate_otp();
+    send_password_reset_otp(
+        state,
+        &hospital.email,
+        hospital
+            .administrator_name
+            .as_deref()
+            .unwrap_or(&hospital.name),
+        &otp,
+    )
+    .await?;
+
+    state
+        .hospital_repository
+        .invalidate_active_password_reset_otps(hospital.id)
+        .await?;
+
+    let otp_hash = state
+        .password_hasher
+        .hash_password(&otp)
+        .map_err(|_| ApiError::Internal("failed to hash OTP".to_owned()))?;
+
+    state
+        .hospital_repository
+        .create_password_reset_otp(NewHospitalPasswordResetOtp {
+            hospital_id: hospital.id,
+            email: hospital.email,
+            otp_hash,
+            expires_at: Utc::now() + Duration::seconds(PASSWORD_RESET_OTP_EXPIRES_IN_SECONDS),
+        })
+        .await?;
+
+    Ok(())
+}
+
+async fn request_patient_password_reset(state: &AppState, email: &str) -> Result<(), ApiError> {
+    let Some(patient) = state.patient_repository.find_patient_by_email(email).await? else {
+        return Ok(());
+    };
+
+    if let Some(created_at) = state
+        .patient_repository
+        .latest_password_reset_otp_created_at(patient.id)
+        .await?
+    {
+        let next_allowed_at =
+            created_at + Duration::seconds(PASSWORD_RESET_OTP_RESEND_COOLDOWN_SECONDS);
+        if next_allowed_at > Utc::now() {
+            return Ok(());
+        }
+    }
+
+    let otp = generate_otp();
+    send_password_reset_otp(state, email, &patient.full_name, &otp).await?;
+
+    state
+        .patient_repository
+        .invalidate_active_password_reset_otps(patient.id)
+        .await?;
+
+    let otp_hash = state
+        .password_hasher
+        .hash_password(&otp)
+        .map_err(|_| ApiError::Internal("failed to hash OTP".to_owned()))?;
+
+    state
+        .patient_repository
+        .create_password_reset_otp(NewPatientPasswordResetOtp {
+            patient_id: patient.id,
+            email: email.to_owned(),
+            otp_hash,
+            expires_at: Utc::now() + Duration::seconds(PASSWORD_RESET_OTP_EXPIRES_IN_SECONDS),
+        })
+        .await?;
+
+    Ok(())
+}
+
+async fn reset_hospital_password(
+    state: &AppState,
+    email: &str,
+    otp: &str,
+    new_password: &str,
+) -> Result<(), ApiError> {
+    let reset_otp = state
+        .hospital_repository
+        .find_latest_password_reset_otp(email)
+        .await?
+        .ok_or_else(invalid_password_reset_otp)?;
+
+    if reset_otp.used_at.is_some() {
+        return Err(ApiError::BadRequest("OTP has already been used".to_owned()));
+    }
+
+    if reset_otp.expires_at <= Utc::now() {
+        return Err(ApiError::BadRequest("OTP has expired".to_owned()));
+    }
+
+    if reset_otp.attempt_count >= PASSWORD_RESET_OTP_MAX_ATTEMPTS {
+        return Err(ApiError::BadRequest(
+            "maximum OTP verification attempts exceeded".to_owned(),
+        ));
+    }
+
+    let otp_matches = state
+        .password_hasher
+        .verify_password(otp.trim(), &reset_otp.otp_hash)
+        .unwrap_or(false);
+
+    if !otp_matches {
+        state
+            .hospital_repository
+            .increment_password_reset_otp_attempts(reset_otp.id)
+            .await?;
+
+        return Err(invalid_password_reset_otp());
+    }
+
+    let password_hash = state
+        .password_hasher
+        .hash_password(new_password)
+        .map_err(|_| ApiError::Internal("failed to hash password".to_owned()))?;
+
+    state
+        .hospital_repository
+        .mark_password_reset_otp_used(reset_otp.id)
+        .await?;
+    state
+        .hospital_repository
+        .update_hospital_password(reset_otp.hospital_id, password_hash)
+        .await?;
+
+    Ok(())
+}
+
+async fn reset_patient_password(
+    state: &AppState,
+    email: &str,
+    otp: &str,
+    new_password: &str,
+) -> Result<(), ApiError> {
+    let reset_otp = state
+        .patient_repository
+        .find_latest_password_reset_otp(email)
+        .await?
+        .ok_or_else(invalid_password_reset_otp)?;
+
+    if reset_otp.used_at.is_some() {
+        return Err(ApiError::BadRequest("OTP has already been used".to_owned()));
+    }
+
+    if reset_otp.expires_at <= Utc::now() {
+        return Err(ApiError::BadRequest("OTP has expired".to_owned()));
+    }
+
+    if reset_otp.attempt_count >= PASSWORD_RESET_OTP_MAX_ATTEMPTS {
+        return Err(ApiError::BadRequest(
+            "maximum OTP verification attempts exceeded".to_owned(),
+        ));
+    }
+
+    let otp_matches = state
+        .password_hasher
+        .verify_password(otp.trim(), &reset_otp.otp_hash)
+        .unwrap_or(false);
+
+    if !otp_matches {
+        state
+            .patient_repository
+            .increment_password_reset_otp_attempts(reset_otp.id)
+            .await?;
+
+        return Err(invalid_password_reset_otp());
+    }
+
+    let password_hash = state
+        .password_hasher
+        .hash_password(new_password)
+        .map_err(|_| ApiError::Internal("failed to hash password".to_owned()))?;
+
+    state
+        .patient_repository
+        .mark_password_reset_otp_used(reset_otp.id)
+        .await?;
+    state
+        .patient_repository
+        .update_patient_password(reset_otp.patient_id, password_hash)
+        .await?;
+
+    Ok(())
+}
+
+async fn send_password_reset_otp(
+    state: &AppState,
+    email: &str,
+    name: &str,
+    otp: &str,
+) -> Result<(), ApiError> {
+    let subject = "Reset your Korede Health password".to_owned();
+    let text_body = format!(
+        "Hello {},\n\nYour Korede Health password reset code is {}.\n\nThis code expires in 5 minutes.\n\nIf you did not request a password reset, you can ignore this email.\n\nThank you,\nKorede Health",
+        name.trim(),
+        otp
+    );
+    let html_body = format!(
+        "<p>Hello {},</p><p>Your Korede Health password reset code is <strong>{}</strong>.</p><p>This code expires in 5 minutes.</p><p>If you did not request a password reset, you can ignore this email.</p><p>Thank you,<br>Korede Health</p>",
+        name.trim(),
+        otp
+    );
+
+    state
+        .email_service
+        .send(EmailMessage {
+            to_email: email.to_owned(),
+            to_name: Some(name.trim().to_owned()),
+            subject,
+            text_body,
+            html_body: Some(html_body),
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to send password reset OTP");
+            ApiError::Internal("failed to send password reset OTP".to_owned())
+        })
+}
+
+fn normalize_password_reset_role(role: &str) -> Result<String, ApiError> {
+    match role.trim().to_lowercase().as_str() {
+        "hospital" => Ok("hospital".to_owned()),
+        "patient" => Ok("patient".to_owned()),
+        _ => Err(ApiError::BadRequest(
+            "role must be either hospital or patient".to_owned(),
+        )),
+    }
+}
+
+fn normalize_email(email: &str) -> Result<String, ApiError> {
+    let email = email.trim().to_lowercase();
+
+    if email.is_empty() || !email.contains('@') || !email.contains('.') {
+        return Err(ApiError::BadRequest("email is invalid".to_owned()));
+    }
+
+    Ok(email)
+}
+
+fn validate_password_reset_otp(otp: &str) -> Result<(), ApiError> {
+    let otp = otp.trim();
+    if otp.len() != PASSWORD_RESET_OTP_LENGTH
+        || !otp.chars().all(|character| character.is_ascii_digit())
+    {
+        return Err(ApiError::BadRequest(
+            "OTP must be a 6-digit code".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_new_password(role: &str, password: &str) -> Result<(), ApiError> {
+    let minimum_length = match role {
+        "hospital" => 12,
+        "patient" => 8,
+        _ => unreachable!(),
+    };
+
+    if password.len() < minimum_length {
+        return Err(ApiError::BadRequest(format!(
+            "password must be at least {minimum_length} characters"
+        )));
+    }
+
+    Ok(())
+}
+
+fn generate_otp() -> String {
+    let value = Uuid::new_v4().as_u128() % 1_000_000;
+    format!("{value:06}")
+}
+
 fn invalid_credentials() -> ApiError {
     ApiError::Unauthorized("invalid email or password".to_owned())
 }
 
 fn invalid_refresh_token() -> ApiError {
     ApiError::Unauthorized("invalid or expired refresh token".to_owned())
+}
+
+fn invalid_password_reset_otp() -> ApiError {
+    ApiError::BadRequest("invalid or expired OTP".to_owned())
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -394,5 +800,53 @@ mod tests {
         assert!(constant_time_eq(b"secret", b"secret"));
         assert!(!constant_time_eq(b"secret", b"wrong"));
         assert!(!constant_time_eq(b"secret", b"secret1"));
+    }
+
+    #[test]
+    fn password_reset_role_validation_accepts_supported_roles() {
+        assert_eq!(
+            normalize_password_reset_role("hospital").unwrap(),
+            "hospital"
+        );
+        assert_eq!(normalize_password_reset_role("PATIENT").unwrap(), "patient");
+    }
+
+    #[test]
+    fn password_reset_role_validation_rejects_unsupported_role() {
+        assert!(matches!(
+            normalize_password_reset_role("admin"),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn password_reset_otp_validation_accepts_six_digits() {
+        assert!(validate_password_reset_otp("123456").is_ok());
+    }
+
+    #[test]
+    fn password_reset_otp_validation_rejects_invalid_shape() {
+        assert!(matches!(
+            validate_password_reset_otp("12345"),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            validate_password_reset_otp("abcdef"),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn new_password_validation_uses_role_specific_minimums() {
+        assert!(validate_new_password("patient", "12345678").is_ok());
+        assert!(validate_new_password("hospital", "123456789012").is_ok());
+        assert!(matches!(
+            validate_new_password("patient", "1234567"),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            validate_new_password("hospital", "12345678901"),
+            Err(ApiError::BadRequest(_))
+        ));
     }
 }

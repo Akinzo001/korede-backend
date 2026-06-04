@@ -11,10 +11,12 @@ use crate::{
         },
         hospital_email_otp::HospitalEmailOtp,
         hospital_login_otp::HospitalLoginOtp,
+        hospital_password_reset_otp::HospitalPasswordResetOtp,
     },
     port::hospital::{
         HospitalRepository, HospitalRepositoryError, NewHospital, NewHospitalAuditLog,
         NewHospitalDocument, NewHospitalEmailOtp, NewHospitalLoginOtp,
+        NewHospitalPasswordResetOtp,
     },
 };
 
@@ -613,6 +615,173 @@ impl HospitalRepository for PostgresHospitalRepository {
         Ok(())
     }
 
+    async fn create_password_reset_otp(
+        &self,
+        otp: NewHospitalPasswordResetOtp,
+    ) -> Result<HospitalPasswordResetOtp, HospitalRepositoryError> {
+        let id = Uuid::new_v4();
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO hospital_password_reset_otps (
+                id,
+                hospital_id,
+                email,
+                otp_hash,
+                expires_at,
+                used_at,
+                attempt_count,
+                created_at
+            )
+            VALUES ($1, $2, LOWER($3), $4, $5, NULL, 0, NOW())
+            RETURNING
+                id,
+                hospital_id,
+                email,
+                otp_hash,
+                expires_at,
+                used_at,
+                attempt_count,
+                created_at
+            "#,
+        )
+        .bind(id)
+        .bind(otp.hospital_id)
+        .bind(otp.email)
+        .bind(otp.otp_hash)
+        .bind(otp.expires_at)
+        .fetch_one(&self.pool)
+        .await?;
+
+        password_reset_otp_from_row(&row).map_err(HospitalRepositoryError::Database)
+    }
+
+    async fn find_latest_password_reset_otp(
+        &self,
+        email: &str,
+    ) -> Result<Option<HospitalPasswordResetOtp>, HospitalRepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hospital_id,
+                email,
+                otp_hash,
+                expires_at,
+                used_at,
+                attempt_count,
+                created_at
+            FROM hospital_password_reset_otps
+            WHERE LOWER(email) = LOWER($1)
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| password_reset_otp_from_row(&row))
+            .transpose()
+            .map_err(HospitalRepositoryError::Database)
+    }
+
+    async fn increment_password_reset_otp_attempts(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE hospital_password_reset_otps
+            SET attempt_count = attempt_count + 1
+            WHERE id = $1
+            "#,
+        )
+        .bind(otp_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn mark_password_reset_otp_used(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE hospital_password_reset_otps
+            SET used_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(otp_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn invalidate_active_password_reset_otps(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE hospital_password_reset_otps
+            SET used_at = NOW()
+            WHERE hospital_id = $1
+              AND used_at IS NULL
+            "#,
+        )
+        .bind(hospital_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn latest_password_reset_otp_created_at(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<Option<DateTime<Utc>>, HospitalRepositoryError> {
+        let created_at = sqlx::query_scalar(
+            r#"
+            SELECT created_at
+            FROM hospital_password_reset_otps
+            WHERE hospital_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(hospital_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(created_at)
+    }
+
+    async fn update_hospital_password(
+        &self,
+        hospital_id: Uuid,
+        password_hash: String,
+    ) -> Result<(), HospitalRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE hospitals
+            SET password_hash = $2,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(hospital_id)
+        .bind(password_hash)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     async fn save_audit_log(
         &self,
         audit_log: NewHospitalAuditLog,
@@ -687,6 +856,21 @@ fn email_otp_from_row(row: &sqlx::postgres::PgRow) -> Result<HospitalEmailOtp, s
 
 fn login_otp_from_row(row: &sqlx::postgres::PgRow) -> Result<HospitalLoginOtp, sqlx::Error> {
     Ok(HospitalLoginOtp {
+        id: row.try_get("id")?,
+        hospital_id: row.try_get("hospital_id")?,
+        email: row.try_get("email")?,
+        otp_hash: row.try_get("otp_hash")?,
+        expires_at: row.try_get("expires_at")?,
+        used_at: row.try_get("used_at")?,
+        attempt_count: row.try_get("attempt_count")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn password_reset_otp_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<HospitalPasswordResetOtp, sqlx::Error> {
+    Ok(HospitalPasswordResetOtp {
         id: row.try_get("id")?,
         hospital_id: row.try_get("hospital_id")?,
         email: row.try_get("email")?,
