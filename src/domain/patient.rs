@@ -32,6 +32,12 @@ pub struct Patient {
     // Optional email address.
     pub email: Option<String>,
 
+    // Whether the patient's email address has been verified.
+    pub email_verified: bool,
+
+    // When the patient's email address was verified.
+    pub email_verified_at: Option<DateTime<Utc>>,
+
     // Password hash for patient account login.
     pub password_hash: Option<String>,
 

@@ -16,5 +16,8 @@ pub mod medical_case;
 // Patient domain model.
 pub mod patient;
 
+// Patient email OTP domain model.
+pub mod patient_email_otp;
+
 // Stored refresh-token session model.
 pub mod refresh_token;

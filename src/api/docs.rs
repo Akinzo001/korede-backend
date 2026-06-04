@@ -18,7 +18,11 @@ use crate::api::{
         VerifyHospitalEmailRequest, VerifyHospitalEmailResponse, VerifyLoginOtpRequest,
         VerifyLoginOtpResponse,
     },
-    patients::{PatientResponse, RegisterPatientRequest, RegisterPatientResponse},
+    patients::{
+        PatientResponse, RegisterPatientRequest, RegisterPatientResponse,
+        ResendPatientEmailOtpRequest, ResendPatientEmailOtpResponse, VerifyPatientEmailRequest,
+        VerifyPatientEmailResponse,
+    },
 };
 
 // Generate an OpenAPI document for the backend.
@@ -47,7 +51,9 @@ use crate::api::{
         crate::api::hospitals::resend_hospital_email_otp,
         crate::api::hospitals::current_hospital,
         crate::api::hospitals::list_documents,
-        crate::api::patients::register_patient
+        crate::api::patients::register_patient,
+        crate::api::patients::verify_patient_email,
+        crate::api::patients::resend_patient_email_otp
     ),
     // List every response/request type that should appear as a schema.
     components(
@@ -77,6 +83,10 @@ use crate::api::{
             HospitalDocumentsResponse,
             RegisterPatientRequest,
             RegisterPatientResponse,
+            VerifyPatientEmailRequest,
+            VerifyPatientEmailResponse,
+            ResendPatientEmailOtpRequest,
+            ResendPatientEmailOtpResponse,
             PatientResponse
         )
     ),

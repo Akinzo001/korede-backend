@@ -1,17 +1,28 @@
-use axum::{Json, Router, extract::State, routing::post};
-use chrono::{DateTime, NaiveDate, Utc};
+use axum::{extract::State, routing::post, Json, Router};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    api::{AppState, error::ApiError},
+    api::{error::ApiError, AppState},
     domain::patient::Patient,
-    port::patient::{NewPatient, PatientRepositoryError},
+    port::{
+        email::EmailMessage,
+        patient::{NewPatient, NewPatientEmailOtp, PatientRepositoryError},
+    },
 };
 
+const OTP_LENGTH: usize = 6;
+const OTP_EXPIRES_IN_SECONDS: i64 = 300;
+const OTP_MAX_ATTEMPTS: i32 = 5;
+const OTP_RESEND_COOLDOWN_SECONDS: i64 = 60;
+
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/register", post(register_patient))
+    Router::new()
+        .route("/register", post(register_patient))
+        .route("/verify-email", post(verify_patient_email))
+        .route("/resend-otp", post(resend_patient_email_otp))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -19,7 +30,7 @@ pub struct RegisterPatientRequest {
     pub username: String,
     pub first_name: String,
     pub last_name: String,
-    pub email: Option<String>,
+    pub email: String,
     pub password: String,
     pub date_of_birth: Option<NaiveDate>,
     pub gender: Option<String>,
@@ -29,6 +40,36 @@ pub struct RegisterPatientRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RegisterPatientResponse {
     pub patient: PatientResponse,
+    pub email_verification_required: bool,
+    pub otp_expires_in_seconds: i64,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct VerifyPatientEmailRequest {
+    pub email: String,
+    pub otp: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VerifyPatientEmailResponse {
+    pub patient_id: Uuid,
+    pub username: String,
+    pub email: String,
+    pub email_verified: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ResendPatientEmailOtpRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ResendPatientEmailOtpResponse {
+    pub email: String,
+    pub otp_expires_in_seconds: i64,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -39,6 +80,8 @@ pub struct PatientResponse {
     pub last_name: Option<String>,
     pub full_name: String,
     pub email: Option<String>,
+    pub email_verified: bool,
+    pub email_verified_at: Option<DateTime<Utc>>,
     pub date_of_birth: Option<NaiveDate>,
     pub gender: Option<String>,
     pub phone_number: Option<String>,
@@ -64,6 +107,7 @@ pub async fn register_patient(
     validate_patient_registration(&request)?;
 
     let username = normalize_username(&request.username)?;
+    let email = normalize_email(&request.email)?;
 
     if state
         .patient_repository
@@ -73,6 +117,18 @@ pub async fn register_patient(
     {
         return Err(PatientRepositoryError::DuplicateUsername.into());
     }
+
+    if state
+        .patient_repository
+        .find_patient_by_email(&email)
+        .await?
+        .is_some()
+    {
+        return Err(PatientRepositoryError::DuplicateEmail.into());
+    }
+
+    let otp = generate_otp();
+    send_patient_email_verification_otp(&state, &email, &request.first_name, &otp).await?;
 
     let password_hash = state
         .password_hasher
@@ -85,11 +141,7 @@ pub async fn register_patient(
             username,
             first_name: request.first_name.trim().to_owned(),
             last_name: request.last_name.trim().to_owned(),
-            email: request
-                .email
-                .as_ref()
-                .map(|email| email.trim().to_lowercase())
-                .filter(|email| !email.is_empty()),
+            email: Some(email.clone()),
             password_hash,
             date_of_birth: request.date_of_birth,
             gender: request
@@ -105,8 +157,164 @@ pub async fn register_patient(
         })
         .await?;
 
+    let otp_hash = state
+        .password_hasher
+        .hash_password(&otp)
+        .map_err(|_| ApiError::Internal("failed to hash OTP".to_owned()))?;
+
+    state
+        .patient_repository
+        .create_email_otp(NewPatientEmailOtp {
+            patient_id: patient.id,
+            email: email.clone(),
+            otp_hash,
+            expires_at: Utc::now() + Duration::seconds(OTP_EXPIRES_IN_SECONDS),
+        })
+        .await?;
+
     Ok(Json(RegisterPatientResponse {
         patient: PatientResponse::from(patient),
+        email_verification_required: true,
+        otp_expires_in_seconds: OTP_EXPIRES_IN_SECONDS,
+        message: "Patient registered. Please verify your email with the OTP sent to your inbox."
+            .to_owned(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/patients/verify-email",
+    tag = "Patients",
+    request_body = VerifyPatientEmailRequest,
+    responses(
+        (status = 200, description = "Patient email verified successfully.", body = VerifyPatientEmailResponse),
+        (status = 400, description = "Invalid or expired OTP."),
+        (status = 404, description = "Patient was not found.")
+    )
+)]
+pub async fn verify_patient_email(
+    State(state): State<AppState>,
+    Json(request): Json<VerifyPatientEmailRequest>,
+) -> Result<Json<VerifyPatientEmailResponse>, ApiError> {
+    validate_email_otp_request(&request.email, &request.otp)?;
+
+    let email = normalize_email(&request.email)?;
+    let otp = state
+        .patient_repository
+        .find_latest_email_otp(&email)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("invalid or expired OTP".to_owned()))?;
+
+    if otp.used_at.is_some() {
+        return Err(ApiError::BadRequest("OTP has already been used".to_owned()));
+    }
+
+    if otp.expires_at <= Utc::now() {
+        return Err(ApiError::BadRequest("OTP has expired".to_owned()));
+    }
+
+    if otp.attempt_count >= OTP_MAX_ATTEMPTS {
+        return Err(ApiError::BadRequest(
+            "maximum OTP verification attempts exceeded".to_owned(),
+        ));
+    }
+
+    let otp_matches = state
+        .password_hasher
+        .verify_password(request.otp.trim(), &otp.otp_hash)
+        .map_err(|_| ApiError::BadRequest("invalid OTP".to_owned()))?;
+
+    if !otp_matches {
+        state
+            .patient_repository
+            .increment_email_otp_attempts(otp.id)
+            .await?;
+
+        return Err(ApiError::BadRequest("invalid OTP".to_owned()));
+    }
+
+    state.patient_repository.mark_email_otp_used(otp.id).await?;
+    let patient = state
+        .patient_repository
+        .mark_patient_email_verified(otp.patient_id)
+        .await?;
+
+    Ok(Json(VerifyPatientEmailResponse {
+        patient_id: patient.id,
+        username: patient.username,
+        email: patient.email.unwrap_or(email),
+        email_verified: patient.email_verified,
+        message: "Email verified successfully.".to_owned(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/patients/resend-otp",
+    tag = "Patients",
+    request_body = ResendPatientEmailOtpRequest,
+    responses(
+        (status = 200, description = "A new OTP was sent.", body = ResendPatientEmailOtpResponse),
+        (status = 400, description = "Email is already verified or resend cooldown is active."),
+        (status = 404, description = "Patient was not found.")
+    )
+)]
+pub async fn resend_patient_email_otp(
+    State(state): State<AppState>,
+    Json(request): Json<ResendPatientEmailOtpRequest>,
+) -> Result<Json<ResendPatientEmailOtpResponse>, ApiError> {
+    let email = normalize_email(&request.email)?;
+    let patient = state
+        .patient_repository
+        .find_patient_by_email(&email)
+        .await?
+        .ok_or(PatientRepositoryError::NotFound)?;
+
+    if patient.email_verified {
+        return Err(ApiError::BadRequest("email is already verified".to_owned()));
+    }
+
+    if let Some(created_at) = state
+        .patient_repository
+        .latest_email_otp_created_at(patient.id)
+        .await?
+    {
+        let next_allowed_at = created_at + Duration::seconds(OTP_RESEND_COOLDOWN_SECONDS);
+        if next_allowed_at > Utc::now() {
+            return Err(ApiError::BadRequest(
+                "please wait before requesting another OTP".to_owned(),
+            ));
+        }
+    }
+
+    let otp = generate_otp();
+    send_patient_email_verification_otp(&state, &email, patient_display_name(&patient), &otp)
+        .await?;
+
+    state
+        .patient_repository
+        .invalidate_active_email_otps(patient.id)
+        .await?;
+
+    let otp_hash = state
+        .password_hasher
+        .hash_password(&otp)
+        .map_err(|_| ApiError::Internal("failed to hash OTP".to_owned()))?;
+
+    state
+        .patient_repository
+        .create_email_otp(NewPatientEmailOtp {
+            patient_id: patient.id,
+            email: email.clone(),
+            otp_hash,
+            expires_at: Utc::now() + Duration::seconds(OTP_EXPIRES_IN_SECONDS),
+        })
+        .await?;
+
+    Ok(Json(ResendPatientEmailOtpResponse {
+        email,
+        otp_expires_in_seconds: OTP_EXPIRES_IN_SECONDS,
+        message: "A new OTP has been sent to your email.".to_owned(),
     }))
 }
 
@@ -127,14 +335,66 @@ fn validate_patient_registration(request: &RegisterPatientRequest) -> Result<(),
         ));
     }
 
-    if let Some(email) = &request.email {
-        let email = email.trim();
-        if !email.is_empty() && (!email.contains('@') || !email.contains('.')) {
-            return Err(ApiError::BadRequest("email is invalid".to_owned()));
-        }
+    normalize_email(&request.email)?;
+
+    Ok(())
+}
+
+async fn send_patient_email_verification_otp(
+    state: &AppState,
+    email: &str,
+    patient_name: &str,
+    otp: &str,
+) -> Result<(), ApiError> {
+    let subject = "Verify your Korede Health email".to_owned();
+    let text_body = format!(
+        "Hello {},\n\nYour Korede Health verification code is {}.\n\nThis code expires in 5 minutes.\n\nIf you did not start this registration, you can ignore this email.\n\nThank you,\nKorede Health",
+        patient_name.trim(),
+        otp
+    );
+    let html_body = format!(
+        "<p>Hello {},</p><p>Your Korede Health verification code is <strong>{}</strong>.</p><p>This code expires in 5 minutes.</p><p>If you did not start this registration, you can ignore this email.</p><p>Thank you,<br>Korede Health</p>",
+        patient_name.trim(),
+        otp
+    );
+
+    state
+        .email_service
+        .send(EmailMessage {
+            to_email: email.to_owned(),
+            to_name: Some(patient_name.trim().to_owned()),
+            subject,
+            text_body,
+            html_body: Some(html_body),
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to send patient email verification OTP");
+            ApiError::Internal("failed to send email verification OTP".to_owned())
+        })
+}
+
+fn validate_email_otp_request(email: &str, otp: &str) -> Result<(), ApiError> {
+    normalize_email(email)?;
+
+    let otp = otp.trim();
+    if otp.len() != OTP_LENGTH || !otp.chars().all(|character| character.is_ascii_digit()) {
+        return Err(ApiError::BadRequest(
+            "OTP must be a 6-digit code".to_owned(),
+        ));
     }
 
     Ok(())
+}
+
+fn normalize_email(email: &str) -> Result<String, ApiError> {
+    let email = email.trim().to_lowercase();
+
+    if email.is_empty() || !email.contains('@') || !email.contains('.') {
+        return Err(ApiError::BadRequest("email is invalid".to_owned()));
+    }
+
+    Ok(email)
 }
 
 fn normalize_username(username: &str) -> Result<String, ApiError> {
@@ -158,6 +418,19 @@ fn normalize_username(username: &str) -> Result<String, ApiError> {
     Ok(username)
 }
 
+fn generate_otp() -> String {
+    let value = Uuid::new_v4().as_u128() % 1_000_000;
+    format!("{value:06}")
+}
+
+fn patient_display_name(patient: &Patient) -> &str {
+    patient
+        .first_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&patient.full_name)
+}
+
 impl From<Patient> for PatientResponse {
     fn from(patient: Patient) -> Self {
         Self {
@@ -167,11 +440,94 @@ impl From<Patient> for PatientResponse {
             last_name: patient.last_name,
             full_name: patient.full_name,
             email: patient.email,
+            email_verified: patient.email_verified,
+            email_verified_at: patient.email_verified_at,
             date_of_birth: patient.date_of_birth,
             gender: patient.gender,
             phone_number: patient.phone_number,
             created_at: patient.created_at,
             updated_at: patient.updated_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_registration_request() -> RegisterPatientRequest {
+        RegisterPatientRequest {
+            username: "patient_one".to_owned(),
+            first_name: "Femi".to_owned(),
+            last_name: "Jacob".to_owned(),
+            email: "femi@example.com".to_owned(),
+            password: "strong-password".to_owned(),
+            date_of_birth: None,
+            gender: Some("male".to_owned()),
+            phone_number: Some("09025540752".to_owned()),
+        }
+    }
+
+    #[test]
+    fn registration_validation_accepts_valid_request() {
+        assert!(validate_patient_registration(&valid_registration_request()).is_ok());
+    }
+
+    #[test]
+    fn registration_validation_requires_email() {
+        let mut request = valid_registration_request();
+        request.email = " ".to_owned();
+
+        assert!(matches!(
+            validate_patient_registration(&request),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn registration_validation_rejects_invalid_email() {
+        let mut request = valid_registration_request();
+        request.email = "not-an-email".to_owned();
+
+        assert!(matches!(
+            validate_patient_registration(&request),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn registration_validation_rejects_invalid_username() {
+        let mut request = valid_registration_request();
+        request.username = "no spaces".to_owned();
+
+        assert!(matches!(
+            validate_patient_registration(&request),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn email_otp_validation_accepts_valid_input() {
+        assert!(validate_email_otp_request("femi@example.com", "123456").is_ok());
+    }
+
+    #[test]
+    fn email_otp_validation_rejects_invalid_otp_shape() {
+        assert!(matches!(
+            validate_email_otp_request("femi@example.com", "12345"),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            validate_email_otp_request("femi@example.com", "abcdef"),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn otp_generation_returns_six_digits() {
+        let otp = generate_otp();
+
+        assert_eq!(otp.len(), 6);
+        assert!(otp.chars().all(|character| character.is_ascii_digit()));
     }
 }
