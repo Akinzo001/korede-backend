@@ -147,6 +147,42 @@ impl PatientRepository for PostgresPatientRepository {
             .map_err(PatientRepositoryError::Database)
     }
 
+    async fn find_patient_by_id(
+        &self,
+        patient_id: Uuid,
+    ) -> Result<Option<Patient>, PatientRepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                username,
+                first_name,
+                last_name,
+                full_name,
+                email,
+                email_verified,
+                email_verified_at,
+                password_hash,
+                date_of_birth,
+                age,
+                gender,
+                phone_number,
+                consent_given,
+                created_at,
+                updated_at
+            FROM patients
+            WHERE id = $1
+            "#,
+        )
+        .bind(patient_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| patient_from_row(&row))
+            .transpose()
+            .map_err(PatientRepositoryError::Database)
+    }
+
     async fn find_patient_by_email(
         &self,
         email: &str,

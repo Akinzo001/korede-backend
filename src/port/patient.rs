@@ -60,6 +60,11 @@ pub trait PatientRepository: Send + Sync {
         username: &str,
     ) -> Result<Option<Patient>, PatientRepositoryError>;
 
+    async fn find_patient_by_id(
+        &self,
+        patient_id: Uuid,
+    ) -> Result<Option<Patient>, PatientRepositoryError>;
+
     async fn find_patient_by_email(
         &self,
         email: &str,

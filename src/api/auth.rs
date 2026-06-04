@@ -158,30 +158,39 @@ pub async fn login(
         }));
     }
 
-    let hospital_login = hospitals::login_hospital(
-        State(state),
-        headers,
-        Json(LoginHospitalRequest {
-            email,
-            password: request.password,
-        }),
-    )
-    .await?;
+    if state
+        .hospital_repository
+        .find_hospital_by_email(&email)
+        .await?
+        .is_some()
+    {
+        let hospital_login = hospitals::login_hospital(
+            State(state),
+            headers,
+            Json(LoginHospitalRequest {
+                email,
+                password: request.password,
+            }),
+        )
+        .await?;
 
-    let hospital_login = hospital_login.0;
-    Ok(Json(LoginResponse {
-        role: "hospital".to_owned(),
-        token_type: None,
-        access_token: None,
-        refresh_token: None,
-        expires_in: None,
-        refresh_expires_in: None,
-        otp_required: hospital_login.otp_required,
-        login_challenge_id: Some(hospital_login.login_challenge_id),
-        email: Some(hospital_login.email),
-        otp_expires_in_seconds: Some(hospital_login.otp_expires_in_seconds),
-        message: hospital_login.message,
-    }))
+        let hospital_login = hospital_login.0;
+        return Ok(Json(LoginResponse {
+            role: "hospital".to_owned(),
+            token_type: None,
+            access_token: None,
+            refresh_token: None,
+            expires_in: None,
+            refresh_expires_in: None,
+            otp_required: hospital_login.otp_required,
+            login_challenge_id: Some(hospital_login.login_challenge_id),
+            email: Some(hospital_login.email),
+            otp_expires_in_seconds: Some(hospital_login.otp_expires_in_seconds),
+            message: hospital_login.message,
+        }));
+    }
+
+    login_patient(&state, &email, &request.password).await
 }
 
 #[utoipa::path(
@@ -289,6 +298,36 @@ pub async fn refresh_token(
                 "hospital".to_owned(),
             )
         }
+        "patient" => {
+            let patient_id =
+                Uuid::parse_str(&stored_token.subject_id).map_err(|_| invalid_refresh_token())?;
+            let patient = state
+                .patient_repository
+                .find_patient_by_id(patient_id)
+                .await?
+                .ok_or_else(invalid_refresh_token)?;
+
+            if !patient.email_verified {
+                return Err(invalid_refresh_token());
+            }
+
+            let email = patient.email.ok_or_else(invalid_refresh_token)?;
+            if email != stored_token.email {
+                return Err(invalid_refresh_token());
+            }
+
+            let access_token = state
+                .token_service
+                .create_patient_access_token(patient.id, &email)
+                .map_err(|_| ApiError::Internal("failed to create access token".to_owned()))?;
+
+            (
+                access_token,
+                patient.id.to_string(),
+                email,
+                "patient".to_owned(),
+            )
+        }
         _ => return Err(invalid_refresh_token()),
     };
 
@@ -313,6 +352,60 @@ pub async fn refresh_token(
         refresh_token: new_refresh_token,
         expires_in: state.jwt_expires_in_seconds,
         refresh_expires_in: state.refresh_token_expires_in_seconds,
+    }))
+}
+
+async fn login_patient(
+    state: &AppState,
+    email: &str,
+    password: &str,
+) -> Result<Json<LoginResponse>, ApiError> {
+    let patient = state
+        .patient_repository
+        .find_patient_by_email(email)
+        .await?
+        .ok_or_else(invalid_credentials)?;
+
+    let password_hash = patient
+        .password_hash
+        .as_deref()
+        .ok_or_else(invalid_credentials)?;
+
+    let password_matches = state
+        .password_hasher
+        .verify_password(password, password_hash)
+        .unwrap_or(false);
+
+    if !password_matches {
+        return Err(invalid_credentials());
+    }
+
+    if !patient.email_verified {
+        return Err(ApiError::Forbidden(
+            "email must be verified before login".to_owned(),
+        ));
+    }
+
+    let email = patient.email.ok_or_else(invalid_credentials)?;
+    let access_token = state
+        .token_service
+        .create_patient_access_token(patient.id, &email)
+        .map_err(|_| ApiError::Internal("failed to create access token".to_owned()))?;
+    let refresh_token =
+        issue_refresh_token(state, patient.id.to_string(), &email, "patient").await?;
+
+    Ok(Json(LoginResponse {
+        role: "patient".to_owned(),
+        token_type: Some("Bearer".to_owned()),
+        access_token: Some(access_token),
+        refresh_token: Some(refresh_token),
+        expires_in: Some(state.jwt_expires_in_seconds),
+        refresh_expires_in: Some(state.refresh_token_expires_in_seconds),
+        otp_required: false,
+        login_challenge_id: None,
+        email: Some(email),
+        otp_expires_in_seconds: None,
+        message: "Login successful.".to_owned(),
     }))
 }
 
