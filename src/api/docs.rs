@@ -18,6 +18,7 @@ use crate::api::{
         VerifyHospitalEmailRequest, VerifyHospitalEmailResponse, VerifyLoginOtpRequest,
         VerifyLoginOtpResponse,
     },
+    patients::{PatientResponse, RegisterPatientRequest, RegisterPatientResponse},
 };
 
 // Generate an OpenAPI document for the backend.
@@ -45,7 +46,8 @@ use crate::api::{
         crate::api::hospitals::verify_hospital_email,
         crate::api::hospitals::resend_hospital_email_otp,
         crate::api::hospitals::current_hospital,
-        crate::api::hospitals::list_documents
+        crate::api::hospitals::list_documents,
+        crate::api::patients::register_patient
     ),
     // List every response/request type that should appear as a schema.
     components(
@@ -72,7 +74,10 @@ use crate::api::{
             VerifyLoginOtpResponse,
             HospitalSummaryResponse,
             HospitalDocumentResponse,
-            HospitalDocumentsResponse
+            HospitalDocumentsResponse,
+            RegisterPatientRequest,
+            RegisterPatientResponse,
+            PatientResponse
         )
     ),
     modifiers(&SecurityAddon),
@@ -81,7 +86,8 @@ use crate::api::{
         (name = "Health", description = "Endpoints for checking whether the API and database are working."),
         (name = "Auth", description = "Centralized login endpoints for platform admins and hospitals."),
         (name = "Admin", description = "Super-admin authentication and platform administration endpoints."),
-        (name = "Hospitals", description = "Hospital registration, authentication, and KYC endpoints.")
+        (name = "Hospitals", description = "Hospital registration, authentication, and KYC endpoints."),
+        (name = "Patients", description = "Patient registration endpoints.")
     )
 )]
 // Empty struct used only as a type that owns the generated OpenAPI document.

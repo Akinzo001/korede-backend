@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::port::hospital::HospitalRepositoryError;
+use crate::port::{hospital::HospitalRepositoryError, patient::PatientRepositoryError};
 
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -49,6 +49,24 @@ impl From<HospitalRepositoryError> for ApiError {
             }
             HospitalRepositoryError::NotFound => Self::NotFound("hospital not found".to_owned()),
             HospitalRepositoryError::Database(error) => {
+                tracing::error!(%error, "database operation failed");
+                Self::Internal("internal server error".to_owned())
+            }
+        }
+    }
+}
+
+impl From<PatientRepositoryError> for ApiError {
+    fn from(error: PatientRepositoryError) -> Self {
+        match error {
+            PatientRepositoryError::DuplicateUsername => {
+                Self::Conflict("patient username already exists".to_owned())
+            }
+            PatientRepositoryError::DuplicateEmail => {
+                Self::Conflict("patient email already exists".to_owned())
+            }
+            PatientRepositoryError::NotFound => Self::NotFound("patient not found".to_owned()),
+            PatientRepositoryError::Database(error) => {
                 tracing::error!(%error, "database operation failed");
                 Self::Internal("internal server error".to_owned())
             }

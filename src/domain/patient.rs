@@ -1,5 +1,5 @@
 // `DateTime<Utc>` represents a date/time stored in UTC.
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 
 // `Serialize` converts Rust values to JSON.
 // `Deserialize` converts JSON into Rust values.
@@ -17,8 +17,26 @@ pub struct Patient {
     // Unique patient ID.
     pub id: Uuid,
 
+    // Unique username used by hospitals to attach cases to this patient.
+    pub username: String,
+
+    // Patient's first name.
+    pub first_name: Option<String>,
+
+    // Patient's last name.
+    pub last_name: Option<String>,
+
     // Patient's full name.
     pub full_name: String,
+
+    // Optional email address.
+    pub email: Option<String>,
+
+    // Password hash for patient account login.
+    pub password_hash: Option<String>,
+
+    // Optional date of birth.
+    pub date_of_birth: Option<NaiveDate>,
 
     // Patient age.
     //

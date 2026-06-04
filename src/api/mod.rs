@@ -7,6 +7,7 @@ pub mod error;
 // Expose the health-check routes module.
 pub mod health;
 pub mod hospitals;
+pub mod patients;
 pub mod tokens;
 
 // `Router` is Axum's route collection type.
@@ -32,6 +33,7 @@ use crate::port::{
     auth::{PasswordHasher, TokenService},
     email::EmailService,
     hospital::HospitalRepository,
+    patient::PatientRepository,
     refresh_token::RefreshTokenRepository,
     storage::DocumentStorage,
 };
@@ -47,6 +49,7 @@ pub struct AppState {
     pub db_pool: PgPool,
 
     pub hospital_repository: Arc<dyn HospitalRepository>,
+    pub patient_repository: Arc<dyn PatientRepository>,
     pub refresh_token_repository: Arc<dyn RefreshTokenRepository>,
     pub password_hasher: Arc<dyn PasswordHasher>,
     pub token_service: Arc<dyn TokenService>,
@@ -76,6 +79,7 @@ pub fn app(state: AppState) -> Router {
         .nest("/api/v1/auth", auth::routes())
         .nest("/api/v1/admin", admin::routes())
         .nest("/api/v1/hospitals", hospitals::routes())
+        .nest("/api/v1/patients", patients::routes())
         .layer(DefaultBodyLimit::max(state.max_upload_bytes))
         // Allow browser requests from any frontend origin for now.
         .layer(CorsLayer::permissive())
