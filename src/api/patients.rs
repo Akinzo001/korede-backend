@@ -1,4 +1,8 @@
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    routing::post,
+    Json, Router,
+};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -6,10 +10,12 @@ use uuid::Uuid;
 
 use crate::{
     api::{error::ApiError, AppState},
-    domain::patient::Patient,
+    domain::{patient::Patient, patient_declaration::PatientDeclaration},
     port::{
+        auth::AuthenticatedPatient,
         email::EmailMessage,
         patient::{NewPatient, NewPatientEmailOtp, PatientRepositoryError},
+        patient_declaration::UpsertPatientDeclaration,
     },
 };
 
@@ -23,6 +29,12 @@ pub fn routes() -> Router<AppState> {
         .route("/register", post(register_patient))
         .route("/verify-email", post(verify_patient_email))
         .route("/resend-otp", post(resend_patient_email_otp))
+        .route(
+            "/declaration",
+            post(upsert_declaration)
+                .put(upsert_declaration)
+                .get(get_declaration),
+        )
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -85,6 +97,20 @@ pub struct PatientResponse {
     pub date_of_birth: Option<NaiveDate>,
     pub gender: Option<String>,
     pub phone_number: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertPatientDeclarationRequest {
+    pub statement: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PatientDeclarationResponse {
+    pub id: Uuid,
+    pub patient_id: Uuid,
+    pub statement: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -318,6 +344,60 @@ pub async fn resend_patient_email_otp(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/patients/declaration",
+    tag = "Patients",
+    security(("bearer_auth" = [])),
+    request_body = UpsertPatientDeclarationRequest,
+    responses(
+        (status = 200, description = "Patient declaration saved.", body = PatientDeclarationResponse),
+        (status = 400, description = "Invalid declaration statement."),
+        (status = 401, description = "Missing or invalid patient bearer token.")
+    )
+)]
+pub async fn upsert_declaration(
+    authenticated: AuthenticatedPatient,
+    State(state): State<AppState>,
+    Json(request): Json<UpsertPatientDeclarationRequest>,
+) -> Result<Json<PatientDeclarationResponse>, ApiError> {
+    let statement = validate_declaration_statement(&request.statement)?;
+
+    let declaration = state
+        .patient_declaration_repository
+        .upsert_patient_declaration(UpsertPatientDeclaration {
+            patient_id: authenticated.patient_id,
+            statement,
+        })
+        .await?;
+
+    Ok(Json(PatientDeclarationResponse::from(declaration)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/patients/declaration",
+    tag = "Patients",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Patient declaration.", body = PatientDeclarationResponse),
+        (status = 401, description = "Missing or invalid patient bearer token."),
+        (status = 404, description = "Patient declaration was not found.")
+    )
+)]
+pub async fn get_declaration(
+    authenticated: AuthenticatedPatient,
+    State(state): State<AppState>,
+) -> Result<Json<PatientDeclarationResponse>, ApiError> {
+    let declaration = state
+        .patient_declaration_repository
+        .find_patient_declaration(authenticated.patient_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("patient declaration not found".to_owned()))?;
+
+    Ok(Json(PatientDeclarationResponse::from(declaration)))
+}
+
 fn validate_patient_registration(request: &RegisterPatientRequest) -> Result<(), ApiError> {
     normalize_username(&request.username)?;
 
@@ -338,6 +418,24 @@ fn validate_patient_registration(request: &RegisterPatientRequest) -> Result<(),
     normalize_email(&request.email)?;
 
     Ok(())
+}
+
+fn validate_declaration_statement(statement: &str) -> Result<String, ApiError> {
+    let statement = statement.trim();
+
+    if statement.len() < 20 {
+        return Err(ApiError::BadRequest(
+            "statement must be at least 20 characters".to_owned(),
+        ));
+    }
+
+    if statement.len() > 5000 {
+        return Err(ApiError::BadRequest(
+            "statement must not exceed 5000 characters".to_owned(),
+        ));
+    }
+
+    Ok(statement.to_owned())
 }
 
 async fn send_patient_email_verification_otp(
@@ -451,6 +549,18 @@ impl From<Patient> for PatientResponse {
     }
 }
 
+impl From<PatientDeclaration> for PatientDeclarationResponse {
+    fn from(declaration: PatientDeclaration) -> Self {
+        Self {
+            id: declaration.id,
+            patient_id: declaration.patient_id,
+            statement: declaration.statement,
+            created_at: declaration.created_at,
+            updated_at: declaration.updated_at,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,5 +639,26 @@ mod tests {
 
         assert_eq!(otp.len(), 6);
         assert!(otp.chars().all(|character| character.is_ascii_digit()));
+    }
+
+    #[test]
+    fn declaration_validation_trims_and_accepts_valid_statement() {
+        let statement = validate_declaration_statement(
+            "  I started feeling severe symptoms after the accident.  ",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            "I started feeling severe symptoms after the accident."
+        );
+    }
+
+    #[test]
+    fn declaration_validation_rejects_short_statement() {
+        assert!(matches!(
+            validate_declaration_statement("too short"),
+            Err(ApiError::BadRequest(_))
+        ));
     }
 }

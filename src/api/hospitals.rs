@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::HeaderMap,
+    Json, Router,
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
@@ -15,6 +15,7 @@ use crate::{
     domain::{
         hospital::{Hospital, HospitalVerificationStatus},
         hospital_document::{HospitalDocument, HospitalDocumentType},
+        patient_declaration::PatientDeclaration,
     },
     port::{
         auth::AuthenticatedHospital,
@@ -38,6 +39,10 @@ pub fn routes() -> Router<AppState> {
         .route("/resend-otp", post(resend_hospital_email_otp))
         .route("/me", get(current_hospital))
         .route("/documents", get(list_documents))
+        .route(
+            "/patients/:username/declaration",
+            get(get_patient_declaration),
+        )
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -177,6 +182,15 @@ pub struct HospitalDocumentResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HospitalDocumentsResponse {
     pub documents: Vec<HospitalDocumentResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalPatientDeclarationResponse {
+    pub id: Uuid,
+    pub patient_id: Uuid,
+    pub statement: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[utoipa::path(
@@ -869,6 +883,34 @@ pub async fn list_documents(
     Ok(Json(HospitalDocumentsResponse { documents }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/hospitals/patients/{username}/declaration",
+    tag = "Hospitals",
+    security(("bearer_auth" = [])),
+    params(
+        ("username" = String, Path, description = "Patient username")
+    ),
+    responses(
+        (status = 200, description = "Patient declaration by username.", body = HospitalPatientDeclarationResponse),
+        (status = 401, description = "Missing or invalid hospital bearer token."),
+        (status = 404, description = "Patient declaration was not found.")
+    )
+)]
+pub async fn get_patient_declaration(
+    _authenticated: AuthenticatedHospital,
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<Json<HospitalPatientDeclarationResponse>, ApiError> {
+    let declaration = state
+        .patient_declaration_repository
+        .find_patient_declaration_by_username(&username)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("patient declaration not found".to_owned()))?;
+
+    Ok(Json(HospitalPatientDeclarationResponse::from(declaration)))
+}
+
 fn validate_registration(request: &RegisterHospitalRequest) -> Result<(), ApiError> {
     if request.name.trim().is_empty()
         || request.email.trim().is_empty()
@@ -1135,6 +1177,18 @@ impl From<HospitalDocument> for HospitalDocumentResponse {
             file_size_bytes: document.file_size_bytes,
             uploaded_at: document.uploaded_at,
             reviewed_at: document.reviewed_at,
+        }
+    }
+}
+
+impl From<PatientDeclaration> for HospitalPatientDeclarationResponse {
+    fn from(declaration: PatientDeclaration) -> Self {
+        Self {
+            id: declaration.id,
+            patient_id: declaration.patient_id,
+            statement: declaration.statement,
+            created_at: declaration.created_at,
+            updated_at: declaration.updated_at,
         }
     }
 }

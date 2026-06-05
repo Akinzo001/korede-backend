@@ -34,6 +34,7 @@ use crate::port::{
     email::EmailService,
     hospital::HospitalRepository,
     patient::PatientRepository,
+    patient_declaration::PatientDeclarationRepository,
     refresh_token::RefreshTokenRepository,
     storage::DocumentStorage,
 };
@@ -50,6 +51,7 @@ pub struct AppState {
 
     pub hospital_repository: Arc<dyn HospitalRepository>,
     pub patient_repository: Arc<dyn PatientRepository>,
+    pub patient_declaration_repository: Arc<dyn PatientDeclarationRepository>,
     pub refresh_token_repository: Arc<dyn RefreshTokenRepository>,
     pub password_hasher: Arc<dyn PasswordHasher>,
     pub token_service: Arc<dyn TokenService>,

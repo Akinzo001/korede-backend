@@ -13,6 +13,7 @@ use crate::{
     domain::{
         hospital::{Hospital, HospitalVerificationStatus},
         hospital_document::HospitalDocument,
+        patient_declaration::PatientDeclaration,
     },
     port::{auth::AuthenticatedAdmin, hospital::HospitalRepositoryError},
 };
@@ -24,6 +25,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/hospitals/:hospital_id/documents",
             get(list_hospital_documents),
+        )
+        .route(
+            "/patients/:username/declaration",
+            get(get_patient_declaration),
         )
 }
 
@@ -84,6 +89,15 @@ pub struct AdminHospitalDocumentResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AdminHospitalDocumentsResponse {
     pub documents: Vec<AdminHospitalDocumentResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminPatientDeclarationResponse {
+    pub id: Uuid,
+    pub patient_id: Uuid,
+    pub statement: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 pub async fn login_admin(
@@ -203,6 +217,34 @@ pub async fn list_hospital_documents(
     Ok(Json(AdminHospitalDocumentsResponse { documents }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/patients/{username}/declaration",
+    tag = "Admin",
+    security(("bearer_auth" = [])),
+    params(
+        ("username" = String, Path, description = "Patient username")
+    ),
+    responses(
+        (status = 200, description = "Patient declaration by username.", body = AdminPatientDeclarationResponse),
+        (status = 401, description = "Missing or invalid admin bearer token."),
+        (status = 404, description = "Patient declaration was not found.")
+    )
+)]
+pub async fn get_patient_declaration(
+    _admin: AuthenticatedAdmin,
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<Json<AdminPatientDeclarationResponse>, ApiError> {
+    let declaration = state
+        .patient_declaration_repository
+        .find_patient_declaration_by_username(&username)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("patient declaration not found".to_owned()))?;
+
+    Ok(Json(AdminPatientDeclarationResponse::from(declaration)))
+}
+
 fn validate_admin_login_request(request: &AdminLoginRequest) -> Result<(), ApiError> {
     if request.email.trim().is_empty() || !request.email.contains('@') {
         return Err(ApiError::BadRequest("email is invalid".to_owned()));
@@ -269,6 +311,18 @@ impl From<HospitalDocument> for AdminHospitalDocumentResponse {
             file_size_bytes: document.file_size_bytes,
             uploaded_at: document.uploaded_at,
             reviewed_at: document.reviewed_at,
+        }
+    }
+}
+
+impl From<PatientDeclaration> for AdminPatientDeclarationResponse {
+    fn from(declaration: PatientDeclaration) -> Self {
+        Self {
+            id: declaration.id,
+            patient_id: declaration.patient_id,
+            statement: declaration.statement,
+            created_at: declaration.created_at,
+            updated_at: declaration.updated_at,
         }
     }
 }

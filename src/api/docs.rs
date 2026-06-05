@@ -7,7 +7,7 @@ use utoipa::OpenApi;
 use crate::api::{
     admin::{
         AdminHospitalDocumentResponse, AdminHospitalDocumentsResponse, AdminHospitalResponse,
-        AdminHospitalsResponse,
+        AdminHospitalsResponse, AdminPatientDeclarationResponse,
     },
     auth::{
         ForgotPasswordRequest, ForgotPasswordResponse, LoginRequest, LoginResponse,
@@ -16,14 +16,15 @@ use crate::api::{
     health::{DatabaseHealthResponse, HealthResponse},
     hospitals::{
         Base64DocumentRequest, HospitalDocumentResponse, HospitalDocumentsResponse,
-        HospitalResponse, HospitalSummaryResponse, RegisterHospitalRequest,
-        RegisterHospitalResponse, ResendHospitalEmailOtpRequest, ResendHospitalEmailOtpResponse,
-        VerifyHospitalEmailRequest, VerifyHospitalEmailResponse, VerifyLoginOtpRequest,
-        VerifyLoginOtpResponse,
+        HospitalPatientDeclarationResponse, HospitalResponse, HospitalSummaryResponse,
+        RegisterHospitalRequest, RegisterHospitalResponse, ResendHospitalEmailOtpRequest,
+        ResendHospitalEmailOtpResponse, VerifyHospitalEmailRequest, VerifyHospitalEmailResponse,
+        VerifyLoginOtpRequest, VerifyLoginOtpResponse,
     },
     patients::{
-        PatientResponse, RegisterPatientRequest, RegisterPatientResponse,
-        ResendPatientEmailOtpRequest, ResendPatientEmailOtpResponse, VerifyPatientEmailRequest,
+        PatientDeclarationResponse, PatientResponse, RegisterPatientRequest,
+        RegisterPatientResponse, ResendPatientEmailOtpRequest, ResendPatientEmailOtpResponse,
+        UpsertPatientDeclarationRequest, VerifyPatientEmailRequest,
         VerifyPatientEmailResponse,
     },
 };
@@ -51,14 +52,18 @@ use crate::api::{
         crate::api::admin::list_hospitals,
         crate::api::admin::get_hospital,
         crate::api::admin::list_hospital_documents,
+        crate::api::admin::get_patient_declaration,
         crate::api::hospitals::register_hospital,
         crate::api::hospitals::verify_hospital_email,
         crate::api::hospitals::resend_hospital_email_otp,
         crate::api::hospitals::current_hospital,
         crate::api::hospitals::list_documents,
+        crate::api::hospitals::get_patient_declaration,
         crate::api::patients::register_patient,
         crate::api::patients::verify_patient_email,
-        crate::api::patients::resend_patient_email_otp
+        crate::api::patients::resend_patient_email_otp,
+        crate::api::patients::upsert_declaration,
+        crate::api::patients::get_declaration
     ),
     // List every response/request type that should appear as a schema.
     components(
@@ -77,6 +82,7 @@ use crate::api::{
             AdminHospitalsResponse,
             AdminHospitalDocumentResponse,
             AdminHospitalDocumentsResponse,
+            AdminPatientDeclarationResponse,
             Base64DocumentRequest,
             RegisterHospitalRequest,
             RegisterHospitalResponse,
@@ -90,12 +96,15 @@ use crate::api::{
             HospitalSummaryResponse,
             HospitalDocumentResponse,
             HospitalDocumentsResponse,
+            HospitalPatientDeclarationResponse,
             RegisterPatientRequest,
             RegisterPatientResponse,
             VerifyPatientEmailRequest,
             VerifyPatientEmailResponse,
             ResendPatientEmailOtpRequest,
             ResendPatientEmailOtpResponse,
+            UpsertPatientDeclarationRequest,
+            PatientDeclarationResponse,
             PatientResponse
         )
     ),

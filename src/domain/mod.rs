@@ -22,6 +22,9 @@ pub mod patient;
 // Patient email OTP domain model.
 pub mod patient_email_otp;
 
+// Patient-written declaration before a hospital creates a case.
+pub mod patient_declaration;
+
 // Patient password reset OTP domain model.
 pub mod patient_password_reset_otp;
 

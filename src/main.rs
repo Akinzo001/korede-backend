@@ -12,6 +12,7 @@ use korede_backend::{
         auth::{Argon2PasswordHasher, JwtTokenService},
         db::{
             hospital_repository::PostgresHospitalRepository,
+            patient_declaration_repository::PostgresPatientDeclarationRepository,
             patient_repository::PostgresPatientRepository,
             postgres::{connect, run_migrations},
             refresh_token_repository::PostgresRefreshTokenRepository,
@@ -113,6 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // That is fine because from this point onward the router owns the state.
     let hospital_repository = Arc::new(PostgresHospitalRepository::new(db_pool.clone()));
     let patient_repository = Arc::new(PostgresPatientRepository::new(db_pool.clone()));
+    let patient_declaration_repository =
+        Arc::new(PostgresPatientDeclarationRepository::new(db_pool.clone()));
     let refresh_token_repository = Arc::new(PostgresRefreshTokenRepository::new(db_pool.clone()));
     let password_hasher = Arc::new(Argon2PasswordHasher);
     let token_service = Arc::new(JwtTokenService::new(
@@ -142,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db_pool,
         hospital_repository,
         patient_repository,
+        patient_declaration_repository,
         refresh_token_repository,
         password_hasher,
         token_service,
