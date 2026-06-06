@@ -502,6 +502,51 @@ async fn send_registration_acknowledgement(
         })
 }
 
+async fn send_patient_case_created_email(
+    state: &AppState,
+    patient_email: &str,
+    patient_name: &str,
+    hospital_name: &str,
+    case_title: &str,
+    bill_amount_kobo: i64,
+    public_slug: &str,
+) -> Result<(), ApiError> {
+    let public_link = public_case_link(public_slug);
+    let amount = format_ngn_amount(bill_amount_kobo);
+    let subject = "A hospital medical case has been created for you".to_owned();
+    let text_body = format!(
+        "Hello {},\n\n{} has created a medical case for you on Korede Health.\n\nCase: {}\nAmount: {}\nLink: {}\n\nThank you,\nKorede Health",
+        patient_name.trim(),
+        hospital_name.trim(),
+        case_title.trim(),
+        amount,
+        public_link
+    );
+    let html_body = format!(
+        "<p>Hello {},</p><p>{} has created a medical case for you on Korede Health.</p><p><strong>Case:</strong> {}</p><p><strong>Amount:</strong> {}</p><p><strong>Link:</strong> {}</p><p>Thank you,<br>Korede Health</p>",
+        patient_name.trim(),
+        hospital_name.trim(),
+        case_title.trim(),
+        amount,
+        public_link
+    );
+
+    state
+        .email_service
+        .send(EmailMessage {
+            to_email: patient_email.to_owned(),
+            to_name: Some(patient_name.trim().to_owned()),
+            subject,
+            text_body,
+            html_body: Some(html_body),
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, %patient_email, "failed to send patient case creation email");
+            ApiError::Internal("failed to send patient case creation email".to_owned())
+        })
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/hospitals/verify-email",
@@ -1048,6 +1093,15 @@ pub async fn create_case(
         .find_patient_by_username(&request.patient_username)
         .await?
         .ok_or_else(|| ApiError::NotFound("patient not found".to_owned()))?;
+    let patient_email = patient
+        .email
+        .clone()
+        .ok_or_else(|| ApiError::BadRequest("patient email is required".to_owned()))?;
+    let hospital = state
+        .hospital_repository
+        .find_hospital_by_id(authenticated.hospital_id)
+        .await?
+        .ok_or(HospitalRepositoryError::NotFound)?;
 
     let declaration = state
         .patient_declaration_repository
@@ -1126,6 +1180,17 @@ pub async fn create_case(
             stored_documents,
         )
         .await?;
+
+    send_patient_case_created_email(
+        &state,
+        &patient_email,
+        &patient.full_name,
+        &hospital.name,
+        &created.case.title,
+        created.case.bill_amount_kobo,
+        created.case.public_slug.as_deref().unwrap_or_default(),
+    )
+    .await?;
 
     Ok(Json(CreateHospitalCaseResponse {
         case: HospitalCaseResponse::from(created.case),
@@ -1379,6 +1444,34 @@ fn generate_case_public_slug(patient_username: &str, title: &str, case_id: Uuid)
 
 fn public_case_link(public_slug: &str) -> String {
     format!("/cases/{public_slug}")
+}
+
+fn format_ngn_amount(amount_kobo: i64) -> String {
+    let naira = amount_kobo / 100;
+    let kobo = amount_kobo.abs() % 100;
+    let mut digits = naira.abs().to_string();
+    let mut formatted = String::new();
+
+    while digits.len() > 3 {
+        let tail = digits.split_off(digits.len() - 3);
+        if formatted.is_empty() {
+            formatted = tail;
+        } else {
+            formatted = format!("{tail},{formatted}");
+        }
+    }
+
+    if formatted.is_empty() {
+        formatted = digits;
+    } else {
+        formatted = format!("{digits},{formatted}");
+    }
+
+    if amount_kobo < 0 {
+        formatted = format!("-{formatted}");
+    }
+
+    format!("NGN {formatted}.{kobo:02}")
 }
 
 fn dashboard_access_for(hospital: &Hospital) -> &'static str {
@@ -1823,6 +1916,12 @@ mod tests {
             public_case_link("oluwaseun34-case-12345678"),
             "/cases/oluwaseun34-case-12345678"
         );
+    }
+
+    #[test]
+    fn ngn_amount_formatting_formats_kobo_as_readable_currency() {
+        assert_eq!(format_ngn_amount(150_000_000), "NGN 1,500,000.00");
+        assert_eq!(format_ngn_amount(12_345), "NGN 123.45");
     }
 
     #[test]
