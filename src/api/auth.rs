@@ -5,7 +5,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -13,10 +13,11 @@ use uuid::Uuid;
 use crate::{
     api::{
         hospitals::{self, LoginHospitalRequest, VerifyLoginOtpRequest, VerifyLoginOtpResponse},
+        patients::PatientResponse,
         tokens::{hash_refresh_token, issue_refresh_token},
         AppState,
     },
-    domain::hospital::HospitalVerificationStatus,
+    domain::{hospital::HospitalVerificationStatus, medical_case::MedicalCase},
     port::{
         auth::{AuthenticatedAdmin, AuthenticatedHospital, AuthenticatedPatient},
         email::EmailMessage,
@@ -60,6 +61,50 @@ pub struct LoginResponse {
     pub email: Option<String>,
     pub otp_expires_in_seconds: Option<i64>,
     pub message: String,
+    pub patient: Option<PatientResponse>,
+    pub medical_cases: Option<Vec<PatientLoginMedicalCaseResponse>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PatientLoginMedicalCaseResponse {
+    pub id: Uuid,
+    pub hospital_id: Uuid,
+    pub patient_id: Uuid,
+    pub title: String,
+    pub public_slug: Option<String>,
+    pub public_link: Option<String>,
+    pub diagnosis_summary: String,
+    pub bill_amount_kobo: i64,
+    pub amount_raised_kobo: i64,
+    pub status: String,
+    pub admitted_at: Option<NaiveDate>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<MedicalCase> for PatientLoginMedicalCaseResponse {
+    fn from(medical_case: MedicalCase) -> Self {
+        let public_link = medical_case
+            .public_slug
+            .as_deref()
+            .map(patient_case_public_link);
+
+        Self {
+            id: medical_case.id,
+            hospital_id: medical_case.hospital_id,
+            patient_id: medical_case.patient_id,
+            title: medical_case.title,
+            public_slug: medical_case.public_slug,
+            public_link,
+            diagnosis_summary: medical_case.diagnosis_summary,
+            bill_amount_kobo: medical_case.bill_amount_kobo,
+            amount_raised_kobo: medical_case.amount_raised_kobo,
+            status: medical_case.status.as_str().to_owned(),
+            admitted_at: medical_case.admitted_at,
+            created_at: medical_case.created_at,
+            updated_at: medical_case.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -156,6 +201,8 @@ pub async fn login(
             email: Some(state.super_admin_email.clone()),
             otp_expires_in_seconds: None,
             message: "Login successful.".to_owned(),
+            patient: None,
+            medical_cases: None,
         }));
     }
 
@@ -188,6 +235,8 @@ pub async fn login(
             email: Some(hospital_login.email),
             otp_expires_in_seconds: Some(hospital_login.otp_expires_in_seconds),
             message: hospital_login.message,
+            patient: None,
+            medical_cases: None,
         }));
     }
 
@@ -387,13 +436,21 @@ async fn login_patient(
         ));
     }
 
-    let email = patient.email.ok_or_else(invalid_credentials)?;
+    let patient_response = PatientResponse::from(patient.clone());
+    let email = patient.email.clone().ok_or_else(invalid_credentials)?;
     let access_token = state
         .token_service
         .create_patient_access_token(patient.id, &email)
         .map_err(|_| ApiError::Internal("failed to create access token".to_owned()))?;
     let refresh_token =
         issue_refresh_token(state, patient.id.to_string(), &email, "patient").await?;
+    let medical_cases = state
+        .medical_case_repository
+        .list_patient_cases(patient.id)
+        .await?
+        .into_iter()
+        .map(PatientLoginMedicalCaseResponse::from)
+        .collect();
 
     Ok(Json(LoginResponse {
         role: "patient".to_owned(),
@@ -407,6 +464,8 @@ async fn login_patient(
         email: Some(email),
         otp_expires_in_seconds: None,
         message: "Login successful.".to_owned(),
+        patient: Some(patient_response),
+        medical_cases: Some(medical_cases),
     }))
 }
 
@@ -886,6 +945,10 @@ fn invalid_password_reset_otp() -> ApiError {
     ApiError::BadRequest("invalid or expired OTP".to_owned())
 }
 
+fn patient_case_public_link(public_slug: &str) -> String {
+    format!("/cases/{public_slug}")
+}
+
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let mut diff = left.len() ^ right.len();
     let max_len = left.len().max(right.len());
@@ -902,6 +965,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::medical_case::MedicalCaseStatus;
 
     #[test]
     fn validates_login_request() {
@@ -979,5 +1043,44 @@ mod tests {
             validate_new_password("hospital", "12345678901"),
             Err(ApiError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn patient_login_case_response_includes_public_link_when_slug_exists() {
+        let now = Utc::now();
+        let medical_case = MedicalCase {
+            id: Uuid::new_v4(),
+            hospital_id: Uuid::new_v4(),
+            patient_id: Uuid::new_v4(),
+            title: "Right femur fracture surgery".to_owned(),
+            public_slug: Some("oluwaseun34-case-12345678".to_owned()),
+            diagnosis_summary: "Patient sustained a severe comminuted fracture.".to_owned(),
+            bill_amount_kobo: 150_000_000,
+            amount_raised_kobo: 0,
+            status: MedicalCaseStatus::Active,
+            admitted_at: NaiveDate::from_ymd_opt(2026, 6, 1),
+            blockchain_network: None,
+            blockchain_tx_digest: None,
+            blockchain_record_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let response = PatientLoginMedicalCaseResponse::from(medical_case);
+
+        assert_eq!(
+            response.public_link.as_deref(),
+            Some("/cases/oluwaseun34-case-12345678")
+        );
+        assert_eq!(response.status, "active");
+        assert_eq!(response.amount_raised_kobo, 0);
+    }
+
+    #[test]
+    fn patient_case_public_link_uses_cases_path() {
+        assert_eq!(
+            patient_case_public_link("oluwaseun34-case-12345678"),
+            "/cases/oluwaseun34-case-12345678"
+        );
     }
 }

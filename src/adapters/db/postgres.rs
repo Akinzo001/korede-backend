@@ -30,6 +30,7 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
 // We do not create a second pool here.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     // `sqlx::migrate!("./migrations")` embeds the migration files at compile time.
+    // Rebuild the binary after adding SQL files so newly added migrations are embedded.
     //
     // `.run(pool)` applies any migration that has not already been applied.
     sqlx::migrate!("./migrations").run(pool).await

@@ -11,7 +11,8 @@ use crate::api::{
     },
     auth::{
         ForgotPasswordRequest, ForgotPasswordResponse, LoginRequest, LoginResponse,
-        RefreshTokenRequest, RefreshTokenResponse, ResetPasswordRequest, ResetPasswordResponse,
+        PatientLoginMedicalCaseResponse, RefreshTokenRequest, RefreshTokenResponse,
+        ResetPasswordRequest, ResetPasswordResponse,
     },
     health::{DatabaseHealthResponse, HealthResponse},
     hospitals::{
@@ -77,6 +78,7 @@ use crate::api::{
             DatabaseHealthResponse,
             LoginRequest,
             LoginResponse,
+            PatientLoginMedicalCaseResponse,
             RefreshTokenRequest,
             RefreshTokenResponse,
             ForgotPasswordRequest,

@@ -169,6 +169,43 @@ impl MedicalCaseRepository for PostgresMedicalCaseRepository {
             documents: created_documents,
         })
     }
+
+    async fn list_patient_cases(
+        &self,
+        patient_id: Uuid,
+    ) -> Result<Vec<MedicalCase>, MedicalCaseRepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hospital_id,
+                patient_id,
+                title,
+                public_slug,
+                diagnosis_summary,
+                bill_amount_kobo,
+                amount_raised_kobo,
+                status,
+                blockchain_network,
+                blockchain_tx_digest,
+                blockchain_record_id,
+                admitted_at,
+                created_at,
+                updated_at
+            FROM medical_cases
+            WHERE patient_id = $1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(patient_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter()
+            .map(medical_case_from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(MedicalCaseRepositoryError::Database)
+    }
 }
 
 fn medical_case_from_row(row: &sqlx::postgres::PgRow) -> Result<MedicalCase, sqlx::Error> {

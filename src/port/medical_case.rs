@@ -60,4 +60,9 @@ pub trait MedicalCaseRepository: Send + Sync {
         billing_items: Vec<NewMedicalCaseBillingItem>,
         documents: Vec<NewMedicalCaseDocument>,
     ) -> Result<CreatedMedicalCase, MedicalCaseRepositoryError>;
+
+    async fn list_patient_cases(
+        &self,
+        patient_id: Uuid,
+    ) -> Result<Vec<MedicalCase>, MedicalCaseRepositoryError>;
 }
