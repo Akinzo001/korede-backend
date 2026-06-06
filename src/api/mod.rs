@@ -14,7 +14,7 @@ pub mod tokens;
 // `routing::get` is a helper for registering GET endpoints.
 use std::sync::Arc;
 
-use axum::{Router, extract::DefaultBodyLimit, routing::get};
+use axum::{extract::DefaultBodyLimit, routing::get, Router};
 
 // `PgPool` is SQLx's PostgreSQL connection pool type.
 use sqlx::PgPool;
@@ -33,6 +33,7 @@ use crate::port::{
     auth::{PasswordHasher, TokenService},
     email::EmailService,
     hospital::HospitalRepository,
+    medical_case::MedicalCaseRepository,
     patient::PatientRepository,
     patient_declaration::PatientDeclarationRepository,
     refresh_token::RefreshTokenRepository,
@@ -50,6 +51,7 @@ pub struct AppState {
     pub db_pool: PgPool,
 
     pub hospital_repository: Arc<dyn HospitalRepository>,
+    pub medical_case_repository: Arc<dyn MedicalCaseRepository>,
     pub patient_repository: Arc<dyn PatientRepository>,
     pub patient_declaration_repository: Arc<dyn PatientDeclarationRepository>,
     pub refresh_token_repository: Arc<dyn RefreshTokenRepository>,

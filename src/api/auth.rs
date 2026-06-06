@@ -1,8 +1,9 @@
 use axum::{
-    Json, Router, async_trait,
+    async_trait,
     extract::{FromRequestParts, State},
-    http::{HeaderMap, StatusCode, request::Parts},
+    http::{request::Parts, HeaderMap, StatusCode},
     routing::post,
+    Json, Router,
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,9 +12,9 @@ use uuid::Uuid;
 
 use crate::{
     api::{
-        AppState,
         hospitals::{self, LoginHospitalRequest, VerifyLoginOtpRequest, VerifyLoginOtpResponse},
         tokens::{hash_refresh_token, issue_refresh_token},
+        AppState,
     },
     domain::hospital::HospitalVerificationStatus,
     port::{
@@ -461,8 +462,12 @@ pub async fn reset_password(
     validate_new_password(&role, &request.new_password)?;
 
     match role.as_str() {
-        "hospital" => reset_hospital_password(&state, &email, &request.otp, &request.new_password).await?,
-        "patient" => reset_patient_password(&state, &email, &request.otp, &request.new_password).await?,
+        "hospital" => {
+            reset_hospital_password(&state, &email, &request.otp, &request.new_password).await?
+        }
+        "patient" => {
+            reset_patient_password(&state, &email, &request.otp, &request.new_password).await?
+        }
         _ => unreachable!(),
     }
 
@@ -565,7 +570,11 @@ fn validate_login_request(request: &LoginRequest) -> Result<(), ApiError> {
 }
 
 async fn request_hospital_password_reset(state: &AppState, email: &str) -> Result<(), ApiError> {
-    let Some(hospital) = state.hospital_repository.find_hospital_by_email(email).await? else {
+    let Some(hospital) = state
+        .hospital_repository
+        .find_hospital_by_email(email)
+        .await?
+    else {
         return Ok(());
     };
 
@@ -617,7 +626,11 @@ async fn request_hospital_password_reset(state: &AppState, email: &str) -> Resul
 }
 
 async fn request_patient_password_reset(state: &AppState, email: &str) -> Result<(), ApiError> {
-    let Some(patient) = state.patient_repository.find_patient_by_email(email).await? else {
+    let Some(patient) = state
+        .patient_repository
+        .find_patient_by_email(email)
+        .await?
+    else {
         return Ok(());
     };
 

@@ -1,5 +1,5 @@
 // `DateTime<Utc>` represents a date/time stored in UTC.
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 
 // `Serialize` converts Rust values to JSON.
 // `Deserialize` converts JSON into Rust values.
@@ -38,6 +38,32 @@ pub enum MedicalCaseStatus {
     Cancelled,
 }
 
+impl MedicalCaseStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::PendingReview => "pending_review",
+            Self::Active => "active",
+            Self::Funded => "funded",
+            Self::TreatmentCommenced => "treatment_commenced",
+            Self::Discharged => "discharged",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "draft" => Self::Draft,
+            "pending_review" => Self::PendingReview,
+            "funded" => Self::Funded,
+            "treatment_commenced" => Self::TreatmentCommenced,
+            "discharged" => Self::Discharged,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Active,
+        }
+    }
+}
+
 // Domain model for a medical fundraising case.
 //
 // We use `MedicalCase` instead of `Case` because `case` can be confusing
@@ -69,6 +95,9 @@ pub struct MedicalCase {
 
     // Current lifecycle status.
     pub status: MedicalCaseStatus,
+
+    // Optional admission date for the hospital case.
+    pub admitted_at: Option<NaiveDate>,
 
     // Optional blockchain network where this case was recorded.
     //

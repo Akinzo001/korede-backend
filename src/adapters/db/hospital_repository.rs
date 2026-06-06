@@ -15,8 +15,7 @@ use crate::{
     },
     port::hospital::{
         HospitalRepository, HospitalRepositoryError, NewHospital, NewHospitalAuditLog,
-        NewHospitalDocument, NewHospitalEmailOtp, NewHospitalLoginOtp,
-        NewHospitalPasswordResetOtp,
+        NewHospitalDocument, NewHospitalEmailOtp, NewHospitalLoginOtp, NewHospitalPasswordResetOtp,
     },
 };
 

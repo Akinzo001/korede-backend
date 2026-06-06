@@ -16,6 +16,12 @@ pub mod hospital_password_reset_otp;
 // Medical fundraising case domain model and lifecycle status.
 pub mod medical_case;
 
+// Medical case itemized billing model.
+pub mod medical_case_billing_item;
+
+// Medical case document model.
+pub mod medical_case_document;
+
 // Patient domain model.
 pub mod patient;
 

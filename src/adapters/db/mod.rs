@@ -2,6 +2,7 @@
 //
 // This module knows how to connect to Postgres using SQLx.
 pub mod hospital_repository;
+pub mod medical_case_repository;
 pub mod patient_declaration_repository;
 pub mod patient_repository;
 pub mod postgres;

@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Path, State},
     routing::get,
+    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    api::{AppState, error::ApiError},
+    api::{error::ApiError, AppState},
     domain::{
         hospital::{Hospital, HospitalVerificationStatus},
         hospital_document::HospitalDocument,

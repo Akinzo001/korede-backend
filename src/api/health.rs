@@ -1,7 +1,7 @@
 // `State` extracts shared application state from Axum.
 // `StatusCode` gives us HTTP status codes like 503.
 // `Json` turns Rust values into JSON HTTP responses.
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{extract::State, http::StatusCode, Json};
 
 // `Serialize` lets structs be converted into JSON.
 use serde::Serialize;

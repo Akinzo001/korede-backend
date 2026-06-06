@@ -488,7 +488,10 @@ impl PatientRepository for PostgresPatientRepository {
         Ok(())
     }
 
-    async fn mark_password_reset_otp_used(&self, otp_id: Uuid) -> Result<(), PatientRepositoryError> {
+    async fn mark_password_reset_otp_used(
+        &self,
+        otp_id: Uuid,
+    ) -> Result<(), PatientRepositoryError> {
         sqlx::query(
             r#"
             UPDATE patient_password_reset_otps

@@ -1,20 +1,24 @@
 use axum::{
     extract::{Path, State},
     http::HeaderMap,
-    Json, Router,
     routing::{get, post},
+    Json, Router,
 };
-use base64::{Engine as _, engine::general_purpose};
-use chrono::{DateTime, Duration, Utc};
+use base64::{engine::general_purpose, Engine as _};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    api::{AppState, error::ApiError, tokens::issue_refresh_token},
+    api::{error::ApiError, tokens::issue_refresh_token, AppState},
     domain::{
         hospital::{Hospital, HospitalVerificationStatus},
         hospital_document::{HospitalDocument, HospitalDocumentType},
+        medical_case::MedicalCase,
+        medical_case_billing_item::MedicalCaseBillingItem,
+        medical_case_document::MedicalCaseDocument,
+        patient::Patient,
         patient_declaration::PatientDeclaration,
     },
     port::{
@@ -24,6 +28,7 @@ use crate::{
             HospitalRepositoryError, NewHospital, NewHospitalAuditLog, NewHospitalDocument,
             NewHospitalEmailOtp, NewHospitalLoginOtp,
         },
+        medical_case::{NewMedicalCase, NewMedicalCaseBillingItem, NewMedicalCaseDocument},
     },
 };
 
@@ -39,10 +44,12 @@ pub fn routes() -> Router<AppState> {
         .route("/resend-otp", post(resend_hospital_email_otp))
         .route("/me", get(current_hospital))
         .route("/documents", get(list_documents))
+        .route("/patients/:username", get(find_patient))
         .route(
             "/patients/:username/declaration",
             get(get_patient_declaration),
         )
+        .route("/cases", post(create_case))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -191,6 +198,99 @@ pub struct HospitalPatientDeclarationResponse {
     pub statement: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalPatientLookupResponse {
+    pub patient: HospitalPatientLookupPatientResponse,
+    pub declaration: HospitalPatientLookupDeclarationResponse,
+    pub can_create_case: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalPatientLookupPatientResponse {
+    pub id: Uuid,
+    pub username: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub email_verified: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalPatientLookupDeclarationResponse {
+    pub exists: bool,
+    pub statement: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateHospitalCaseRequest {
+    pub patient_username: String,
+    pub title: String,
+    pub diagnosis_summary: String,
+    pub admitted_at: Option<NaiveDate>,
+    pub billing_items: Vec<CreateHospitalCaseBillingItemRequest>,
+    #[serde(default)]
+    pub documents: Vec<CreateHospitalCaseDocumentRequest>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateHospitalCaseBillingItemRequest {
+    pub description: String,
+    pub amount_kobo: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateHospitalCaseDocumentRequest {
+    pub document_type: String,
+    pub original_filename: String,
+    pub mime_type: String,
+    pub content_base64: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CreateHospitalCaseResponse {
+    pub case: HospitalCaseResponse,
+    pub patient: HospitalPatientLookupPatientResponse,
+    pub patient_declaration: HospitalPatientDeclarationResponse,
+    pub billing_items: Vec<HospitalCaseBillingItemResponse>,
+    pub documents: Vec<HospitalCaseDocumentResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalCaseResponse {
+    pub id: Uuid,
+    pub hospital_id: Uuid,
+    pub patient_id: Uuid,
+    pub title: String,
+    pub diagnosis_summary: String,
+    pub bill_amount_kobo: i64,
+    pub amount_raised_kobo: i64,
+    pub status: String,
+    pub admitted_at: Option<NaiveDate>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalCaseBillingItemResponse {
+    pub id: Uuid,
+    pub medical_case_id: Uuid,
+    pub description: String,
+    pub amount_kobo: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalCaseDocumentResponse {
+    pub id: Uuid,
+    pub medical_case_id: Uuid,
+    pub hospital_id: Uuid,
+    pub document_type: String,
+    pub original_filename: String,
+    pub mime_type: String,
+    pub file_size_bytes: i64,
+    pub uploaded_at: DateTime<Utc>,
 }
 
 #[utoipa::path(
@@ -885,6 +985,162 @@ pub async fn list_documents(
 
 #[utoipa::path(
     get,
+    path = "/api/v1/hospitals/patients/{username}",
+    tag = "Hospitals",
+    security(("bearer_auth" = [])),
+    params(
+        ("username" = String, Path, description = "Patient username")
+    ),
+    responses(
+        (status = 200, description = "Patient lookup result for hospital case creation.", body = HospitalPatientLookupResponse),
+        (status = 401, description = "Missing or invalid hospital bearer token."),
+        (status = 404, description = "Patient was not found.")
+    )
+)]
+pub async fn find_patient(
+    _authenticated: AuthenticatedHospital,
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<Json<HospitalPatientLookupResponse>, ApiError> {
+    let patient = state
+        .patient_repository
+        .find_patient_by_username(&username)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("patient not found".to_owned()))?;
+
+    let declaration = state
+        .patient_declaration_repository
+        .find_patient_declaration(patient.id)
+        .await?;
+
+    Ok(Json(HospitalPatientLookupResponse::from((
+        patient,
+        declaration,
+    ))))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/hospitals/cases",
+    tag = "Hospitals",
+    security(("bearer_auth" = [])),
+    request_body = CreateHospitalCaseRequest,
+    responses(
+        (status = 200, description = "Case created and published successfully.", body = CreateHospitalCaseResponse),
+        (status = 400, description = "Invalid case creation request."),
+        (status = 401, description = "Missing or invalid hospital bearer token."),
+        (status = 404, description = "Patient was not found."),
+        (status = 413, description = "Uploaded document is too large."),
+        (status = 415, description = "Unsupported document type.")
+    )
+)]
+pub async fn create_case(
+    authenticated: AuthenticatedHospital,
+    State(state): State<AppState>,
+    Json(request): Json<CreateHospitalCaseRequest>,
+) -> Result<Json<CreateHospitalCaseResponse>, ApiError> {
+    validate_create_case_request(&request)?;
+
+    let patient = state
+        .patient_repository
+        .find_patient_by_username(&request.patient_username)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("patient not found".to_owned()))?;
+
+    let declaration = state
+        .patient_declaration_repository
+        .find_patient_declaration(patient.id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::BadRequest("patient declaration is required before case creation".to_owned())
+        })?;
+
+    let case_id = Uuid::new_v4();
+    let mut stored_documents = Vec::with_capacity(request.documents.len());
+
+    for document in &request.documents {
+        let contents = decode_base64_document(
+            &Base64DocumentRequest {
+                original_filename: document.original_filename.clone(),
+                mime_type: document.mime_type.clone(),
+                content_base64: document.content_base64.clone(),
+            },
+            state.max_upload_bytes,
+        )?;
+        let mime_type = normalized_document_mime_type(&document.mime_type)?;
+        let stored = state
+            .document_storage
+            .save_case_document(
+                authenticated.hospital_id,
+                case_id,
+                document.document_type.trim(),
+                document.original_filename.trim(),
+                mime_type,
+                &contents,
+            )
+            .await
+            .map_err(|_| ApiError::Internal("failed to store document".to_owned()))?;
+
+        stored_documents.push(NewMedicalCaseDocument {
+            document_type: document.document_type.trim().to_owned(),
+            storage_provider: stored.storage_provider,
+            storage_key: stored.storage_key,
+            original_filename: stored.original_filename,
+            mime_type: stored.mime_type,
+            file_size_bytes: stored.file_size_bytes,
+        });
+    }
+
+    let billing_items = request
+        .billing_items
+        .iter()
+        .map(|item| NewMedicalCaseBillingItem {
+            description: item.description.trim().to_owned(),
+            amount_kobo: item.amount_kobo,
+        })
+        .collect::<Vec<_>>();
+    let bill_amount_kobo = billing_items.iter().try_fold(0_i64, |total, item| {
+        total
+            .checked_add(item.amount_kobo)
+            .ok_or_else(|| ApiError::BadRequest("billing total is too large".to_owned()))
+    })?;
+
+    let created = state
+        .medical_case_repository
+        .create_published_case(
+            NewMedicalCase {
+                id: case_id,
+                hospital_id: authenticated.hospital_id,
+                patient_id: patient.id,
+                title: request.title.trim().to_owned(),
+                diagnosis_summary: request.diagnosis_summary.trim().to_owned(),
+                bill_amount_kobo,
+                admitted_at: request.admitted_at,
+            },
+            billing_items,
+            stored_documents,
+        )
+        .await?;
+
+    Ok(Json(CreateHospitalCaseResponse {
+        case: HospitalCaseResponse::from(created.case),
+        patient: HospitalPatientLookupPatientResponse::from(patient),
+        patient_declaration: HospitalPatientDeclarationResponse::from(declaration),
+        billing_items: created
+            .billing_items
+            .into_iter()
+            .map(HospitalCaseBillingItemResponse::from)
+            .collect(),
+        documents: created
+            .documents
+            .into_iter()
+            .map(HospitalCaseDocumentResponse::from)
+            .collect(),
+    }))
+}
+
+#[utoipa::path(
+    get,
     path = "/api/v1/hospitals/patients/{username}/declaration",
     tag = "Hospitals",
     security(("bearer_auth" = [])),
@@ -957,6 +1213,53 @@ fn validate_registration(request: &RegisterHospitalRequest) -> Result<(), ApiErr
 
     validate_mime_type(request.cac_document.mime_type.trim())?;
     validate_mime_type(request.medical_license_document.mime_type.trim())?;
+
+    Ok(())
+}
+
+fn validate_create_case_request(request: &CreateHospitalCaseRequest) -> Result<(), ApiError> {
+    if request.patient_username.trim().is_empty()
+        || request.title.trim().is_empty()
+        || request.diagnosis_summary.trim().is_empty()
+    {
+        return Err(ApiError::BadRequest(
+            "required fields are missing".to_owned(),
+        ));
+    }
+
+    if request.billing_items.is_empty() {
+        return Err(ApiError::BadRequest(
+            "at least one billing item is required".to_owned(),
+        ));
+    }
+
+    for item in &request.billing_items {
+        if item.description.trim().is_empty() {
+            return Err(ApiError::BadRequest(
+                "billing item description is required".to_owned(),
+            ));
+        }
+
+        if item.amount_kobo <= 0 {
+            return Err(ApiError::BadRequest(
+                "billing item amount must be greater than zero".to_owned(),
+            ));
+        }
+    }
+
+    for document in &request.documents {
+        if document.document_type.trim().is_empty()
+            || document.original_filename.trim().is_empty()
+            || document.mime_type.trim().is_empty()
+            || document.content_base64.trim().is_empty()
+        {
+            return Err(ApiError::BadRequest(
+                "document fields are required".to_owned(),
+            ));
+        }
+
+        validate_mime_type(document.mime_type.trim())?;
+    }
 
     Ok(())
 }
@@ -1189,6 +1492,90 @@ impl From<PatientDeclaration> for HospitalPatientDeclarationResponse {
             statement: declaration.statement,
             created_at: declaration.created_at,
             updated_at: declaration.updated_at,
+        }
+    }
+}
+
+impl From<Patient> for HospitalPatientLookupPatientResponse {
+    fn from(patient: Patient) -> Self {
+        Self {
+            id: patient.id,
+            username: patient.username,
+            first_name: patient.first_name,
+            last_name: patient.last_name,
+            email_verified: patient.email_verified,
+        }
+    }
+}
+
+impl From<(Patient, Option<PatientDeclaration>)> for HospitalPatientLookupResponse {
+    fn from((patient, declaration): (Patient, Option<PatientDeclaration>)) -> Self {
+        let declaration = declaration.map(HospitalPatientLookupDeclarationResponse::from);
+        let can_create_case = declaration.is_some();
+
+        Self {
+            patient: HospitalPatientLookupPatientResponse::from(patient),
+            declaration: declaration.unwrap_or(HospitalPatientLookupDeclarationResponse {
+                exists: false,
+                statement: None,
+                created_at: None,
+            }),
+            can_create_case,
+        }
+    }
+}
+
+impl From<PatientDeclaration> for HospitalPatientLookupDeclarationResponse {
+    fn from(declaration: PatientDeclaration) -> Self {
+        Self {
+            exists: true,
+            statement: Some(declaration.statement),
+            created_at: Some(declaration.created_at),
+        }
+    }
+}
+
+impl From<MedicalCase> for HospitalCaseResponse {
+    fn from(medical_case: MedicalCase) -> Self {
+        Self {
+            id: medical_case.id,
+            hospital_id: medical_case.hospital_id,
+            patient_id: medical_case.patient_id,
+            title: medical_case.title,
+            diagnosis_summary: medical_case.diagnosis_summary,
+            bill_amount_kobo: medical_case.bill_amount_kobo,
+            amount_raised_kobo: medical_case.amount_raised_kobo,
+            status: medical_case.status.as_str().to_owned(),
+            admitted_at: medical_case.admitted_at,
+            created_at: medical_case.created_at,
+            updated_at: medical_case.updated_at,
+        }
+    }
+}
+
+impl From<MedicalCaseBillingItem> for HospitalCaseBillingItemResponse {
+    fn from(item: MedicalCaseBillingItem) -> Self {
+        Self {
+            id: item.id,
+            medical_case_id: item.medical_case_id,
+            description: item.description,
+            amount_kobo: item.amount_kobo,
+            created_at: item.created_at,
+        }
+    }
+}
+
+impl From<MedicalCaseDocument> for HospitalCaseDocumentResponse {
+    fn from(document: MedicalCaseDocument) -> Self {
+        Self {
+            id: document.id,
+            medical_case_id: document.medical_case_id,
+            hospital_id: document.hospital_id,
+            document_type: document.document_type,
+            original_filename: document.original_filename,
+            mime_type: document.mime_type,
+            file_size_bytes: document.file_size_bytes,
+            uploaded_at: document.uploaded_at,
         }
     }
 }

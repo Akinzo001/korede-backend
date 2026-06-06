@@ -1,11 +1,11 @@
 use argon2::{
-    Argon2,
     password_hash::{
-        PasswordHash, PasswordHasher as _, PasswordVerifier as _, SaltString, rand_core::OsRng,
+        rand_core::OsRng, PasswordHash, PasswordHasher as _, PasswordVerifier as _, SaltString,
     },
+    Argon2,
 };
 use chrono::Utc;
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -164,7 +164,8 @@ impl TokenService for JwtTokenService {
             return Err(TokenError::Invalid);
         }
 
-        let patient_id = Uuid::parse_str(&token_data.claims.sub).map_err(|_| TokenError::Invalid)?;
+        let patient_id =
+            Uuid::parse_str(&token_data.claims.sub).map_err(|_| TokenError::Invalid)?;
 
         Ok(AuthenticatedPatient {
             patient_id,
@@ -201,16 +202,12 @@ mod tests {
         let hasher = Argon2PasswordHasher;
         let password_hash = hasher.hash_password("strong-password").unwrap();
 
-        assert!(
-            hasher
-                .verify_password("strong-password", &password_hash)
-                .unwrap()
-        );
-        assert!(
-            !hasher
-                .verify_password("wrong-password", &password_hash)
-                .unwrap()
-        );
+        assert!(hasher
+            .verify_password("strong-password", &password_hash)
+            .unwrap());
+        assert!(!hasher
+            .verify_password("wrong-password", &password_hash)
+            .unwrap());
     }
 
     #[test]

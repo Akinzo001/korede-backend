@@ -1,14 +1,13 @@
 use axum::{
-    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
+    Json,
 };
 use serde::Serialize;
 
 use crate::port::{
-    hospital::HospitalRepositoryError,
-    patient::PatientRepositoryError,
-    patient_declaration::PatientDeclarationRepositoryError,
+    hospital::HospitalRepositoryError, medical_case::MedicalCaseRepositoryError,
+    patient::PatientRepositoryError, patient_declaration::PatientDeclarationRepositoryError,
 };
 
 #[derive(Debug, Serialize)]
@@ -85,6 +84,20 @@ impl From<PatientDeclarationRepositoryError> for ApiError {
                 Self::NotFound("patient declaration not found".to_owned())
             }
             PatientDeclarationRepositoryError::Database(error) => {
+                tracing::error!(%error, "database operation failed");
+                Self::Internal("internal server error".to_owned())
+            }
+        }
+    }
+}
+
+impl From<MedicalCaseRepositoryError> for ApiError {
+    fn from(error: MedicalCaseRepositoryError) -> Self {
+        match error {
+            MedicalCaseRepositoryError::NotFound => {
+                Self::NotFound("medical case not found".to_owned())
+            }
+            MedicalCaseRepositoryError::Database(error) => {
                 tracing::error!(%error, "database operation failed");
                 Self::Internal("internal server error".to_owned())
             }

@@ -1,6 +1,6 @@
 // `PgPool` is SQLx's PostgreSQL connection pool type.
 // `PgPoolOptions` configures how the pool should be created.
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 
 // Create a PostgreSQL connection pool.
 //

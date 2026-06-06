@@ -32,4 +32,14 @@ pub trait DocumentStorage: Send + Sync {
         mime_type: &str,
         contents: &[u8],
     ) -> Result<StoredDocument, DocumentStorageError>;
+
+    async fn save_case_document(
+        &self,
+        hospital_id: Uuid,
+        case_id: Uuid,
+        document_type: &str,
+        original_filename: &str,
+        mime_type: &str,
+        contents: &[u8],
+    ) -> Result<StoredDocument, DocumentStorageError>;
 }

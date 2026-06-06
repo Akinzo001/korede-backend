@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use aws_credential_types::Credentials;
-use aws_sdk_s3::{Client as S3Client, config::BehaviorVersion, primitives::ByteStream};
+use aws_sdk_s3::{config::BehaviorVersion, primitives::ByteStream, Client as S3Client};
 use aws_smithy_runtime_api::client::result::SdkError;
 use aws_types::region::Region;
 use sanitize_filename::sanitize;
@@ -116,6 +116,48 @@ impl DocumentStorage for LocalDocumentStorage {
             file_size_bytes: contents.len() as i64,
         })
     }
+
+    async fn save_case_document(
+        &self,
+        hospital_id: Uuid,
+        case_id: Uuid,
+        document_type: &str,
+        original_filename: &str,
+        mime_type: &str,
+        contents: &[u8],
+    ) -> Result<StoredDocument, DocumentStorageError> {
+        let safe_original_filename = sanitize(original_filename);
+        let safe_document_type = sanitize(document_type);
+        let extension = extension_for(mime_type, &safe_original_filename);
+        let generated_filename = format!("{}.{}", Uuid::new_v4(), extension);
+
+        let relative_path = PathBuf::from("cases")
+            .join("hospitals")
+            .join(hospital_id.to_string())
+            .join(case_id.to_string())
+            .join(safe_document_type)
+            .join(generated_filename);
+
+        let full_path = self.root.join(&relative_path);
+
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|_| DocumentStorageError::StoreFailed)?;
+        }
+
+        fs::write(&full_path, contents)
+            .await
+            .map_err(|_| DocumentStorageError::StoreFailed)?;
+
+        Ok(StoredDocument {
+            storage_provider: "local".to_owned(),
+            storage_key: relative_path.to_string_lossy().replace('\\', "/"),
+            original_filename: safe_original_filename,
+            mime_type: mime_type.to_owned(),
+            file_size_bytes: contents.len() as i64,
+        })
+    }
 }
 
 #[async_trait]
@@ -136,6 +178,46 @@ impl DocumentStorage for BackblazeDocumentStorage {
             hospital_id,
             document_type.as_str(),
             generated_filename
+        );
+
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&storage_key)
+            .content_type(mime_type)
+            .body(ByteStream::from(contents.to_vec()))
+            .send()
+            .await
+            .map_err(|error| {
+                log_backblaze_error(error);
+                DocumentStorageError::StoreFailed
+            })?;
+
+        Ok(StoredDocument {
+            storage_provider: "backblaze".to_owned(),
+            storage_key,
+            original_filename: safe_original_filename,
+            mime_type: mime_type.to_owned(),
+            file_size_bytes: contents.len() as i64,
+        })
+    }
+
+    async fn save_case_document(
+        &self,
+        hospital_id: Uuid,
+        case_id: Uuid,
+        document_type: &str,
+        original_filename: &str,
+        mime_type: &str,
+        contents: &[u8],
+    ) -> Result<StoredDocument, DocumentStorageError> {
+        let safe_original_filename = sanitize(original_filename);
+        let safe_document_type = sanitize(document_type);
+        let extension = extension_for(mime_type, &safe_original_filename);
+        let generated_filename = format!("{}.{}", Uuid::new_v4(), extension);
+        let storage_key = format!(
+            "cases/hospitals/{}/{}/{}/{}",
+            hospital_id, case_id, safe_document_type, generated_filename
         );
 
         self.client

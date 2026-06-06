@@ -12,6 +12,7 @@ use korede_backend::{
         auth::{Argon2PasswordHasher, JwtTokenService},
         db::{
             hospital_repository::PostgresHospitalRepository,
+            medical_case_repository::PostgresMedicalCaseRepository,
             patient_declaration_repository::PostgresPatientDeclarationRepository,
             patient_repository::PostgresPatientRepository,
             postgres::{connect, run_migrations},
@@ -27,7 +28,7 @@ use korede_backend::{
     // `app` builds the Axum router with routes like:
     // GET /health
     // GET /health/db
-    api::{AppState, app},
+    api::{app, AppState},
 
     // `AppConfig` is the central place where environment variables
     // are loaded and validated.
@@ -113,6 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This moves ownership of `db_pool` into `AppState`.
     // That is fine because from this point onward the router owns the state.
     let hospital_repository = Arc::new(PostgresHospitalRepository::new(db_pool.clone()));
+    let medical_case_repository = Arc::new(PostgresMedicalCaseRepository::new(db_pool.clone()));
     let patient_repository = Arc::new(PostgresPatientRepository::new(db_pool.clone()));
     let patient_declaration_repository =
         Arc::new(PostgresPatientDeclarationRepository::new(db_pool.clone()));
@@ -144,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         db_pool,
         hospital_repository,
+        medical_case_repository,
         patient_repository,
         patient_declaration_repository,
         refresh_token_repository,
