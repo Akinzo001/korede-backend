@@ -82,6 +82,9 @@ pub struct MedicalCase {
     // Public campaign title.
     pub title: String,
 
+    // Public unique slug used in donor-facing case links.
+    pub public_slug: Option<String>,
+
     // Short medical summary provided/verified by the hospital.
     pub diagnosis_summary: String,
 

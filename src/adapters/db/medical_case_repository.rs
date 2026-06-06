@@ -44,6 +44,7 @@ impl MedicalCaseRepository for PostgresMedicalCaseRepository {
                 hospital_id,
                 patient_id,
                 title,
+                public_slug,
                 diagnosis_summary,
                 bill_amount_kobo,
                 amount_raised_kobo,
@@ -52,12 +53,13 @@ impl MedicalCaseRepository for PostgresMedicalCaseRepository {
                 created_at,
                 updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, NOW(), NOW())
             RETURNING
                 id,
                 hospital_id,
                 patient_id,
                 title,
+                public_slug,
                 diagnosis_summary,
                 bill_amount_kobo,
                 amount_raised_kobo,
@@ -74,6 +76,7 @@ impl MedicalCaseRepository for PostgresMedicalCaseRepository {
         .bind(medical_case.hospital_id)
         .bind(medical_case.patient_id)
         .bind(medical_case.title)
+        .bind(medical_case.public_slug)
         .bind(medical_case.diagnosis_summary)
         .bind(medical_case.bill_amount_kobo)
         .bind(MedicalCaseStatus::Active.as_str())
@@ -176,6 +179,7 @@ fn medical_case_from_row(row: &sqlx::postgres::PgRow) -> Result<MedicalCase, sql
         hospital_id: row.try_get("hospital_id")?,
         patient_id: row.try_get("patient_id")?,
         title: row.try_get("title")?,
+        public_slug: row.try_get("public_slug")?,
         diagnosis_summary: row.try_get("diagnosis_summary")?,
         bill_amount_kobo: row.try_get("bill_amount_kobo")?,
         amount_raised_kobo: row.try_get("amount_raised_kobo")?,

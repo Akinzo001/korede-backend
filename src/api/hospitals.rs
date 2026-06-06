@@ -263,6 +263,8 @@ pub struct HospitalCaseResponse {
     pub hospital_id: Uuid,
     pub patient_id: Uuid,
     pub title: String,
+    pub public_slug: String,
+    pub public_link: String,
     pub diagnosis_summary: String,
     pub bill_amount_kobo: i64,
     pub amount_raised_kobo: i64,
@@ -1056,6 +1058,8 @@ pub async fn create_case(
         })?;
 
     let case_id = Uuid::new_v4();
+    let public_slug =
+        generate_case_public_slug(&request.patient_username, &request.title, case_id);
     let mut stored_documents = Vec::with_capacity(request.documents.len());
 
     for document in &request.documents {
@@ -1113,6 +1117,7 @@ pub async fn create_case(
                 hospital_id: authenticated.hospital_id,
                 patient_id: patient.id,
                 title: request.title.trim().to_owned(),
+                public_slug,
                 diagnosis_summary: request.diagnosis_summary.trim().to_owned(),
                 bill_amount_kobo,
                 admitted_at: request.admitted_at,
@@ -1343,6 +1348,39 @@ fn generate_otp() -> String {
     format!("{value:06}")
 }
 
+fn generate_case_public_slug(patient_username: &str, title: &str, case_id: Uuid) -> String {
+    let prefix_source = format!("{} {}", patient_username.trim(), title.trim());
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+
+    for character in prefix_source.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if (character.is_whitespace() || character == '-' || character == '_')
+            && !slug.is_empty()
+            && !last_was_separator
+        {
+            slug.push('-');
+            last_was_separator = true;
+        }
+
+        if slug.len() >= 80 {
+            break;
+        }
+    }
+
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "case" } else { slug };
+    let unique_suffix = case_id.simple().to_string();
+
+    format!("{}-{}", slug, &unique_suffix[..8])
+}
+
+fn public_case_link(public_slug: &str) -> String {
+    format!("/cases/{public_slug}")
+}
+
 fn dashboard_access_for(hospital: &Hospital) -> &'static str {
     match hospital.verification_status {
         HospitalVerificationStatus::Verified => "full",
@@ -1542,6 +1580,8 @@ impl From<MedicalCase> for HospitalCaseResponse {
             hospital_id: medical_case.hospital_id,
             patient_id: medical_case.patient_id,
             title: medical_case.title,
+            public_slug: medical_case.public_slug.clone().unwrap_or_default(),
+            public_link: public_case_link(medical_case.public_slug.as_deref().unwrap_or_default()),
             diagnosis_summary: medical_case.diagnosis_summary,
             bill_amount_kobo: medical_case.bill_amount_kobo,
             amount_raised_kobo: medical_case.amount_raised_kobo,
@@ -1633,6 +1673,20 @@ mod tests {
         }
     }
 
+    fn valid_case_request() -> CreateHospitalCaseRequest {
+        CreateHospitalCaseRequest {
+            patient_username: "oluwaseun34".to_owned(),
+            title: "Right Femur Fracture Surgery".to_owned(),
+            diagnosis_summary: "Patient requires urgent ORIF surgery.".to_owned(),
+            admitted_at: None,
+            billing_items: vec![CreateHospitalCaseBillingItemRequest {
+                description: "Surgery".to_owned(),
+                amount_kobo: 150_000_000,
+            }],
+            documents: vec![],
+        }
+    }
+
     #[test]
     fn registration_validation_accepts_valid_request() {
         assert!(validate_registration(&valid_registration_request()).is_ok());
@@ -1714,6 +1768,61 @@ mod tests {
             validate_mime_type("text/plain"),
             Err(ApiError::UnsupportedMediaType(_))
         ));
+    }
+
+    #[test]
+    fn case_creation_validation_accepts_valid_request() {
+        assert!(validate_create_case_request(&valid_case_request()).is_ok());
+    }
+
+    #[test]
+    fn case_creation_validation_rejects_empty_billing_items() {
+        let mut request = valid_case_request();
+        request.billing_items.clear();
+
+        assert!(matches!(
+            validate_create_case_request(&request),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn case_creation_validation_rejects_non_positive_billing_amount() {
+        let mut request = valid_case_request();
+        request.billing_items[0].amount_kobo = 0;
+
+        assert!(matches!(
+            validate_create_case_request(&request),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn public_slug_generation_uses_patient_title_and_uuid_suffix() {
+        let case_id = Uuid::parse_str("12345678-90ab-cdef-1234-567890abcdef").unwrap();
+        let slug = generate_case_public_slug(
+            "Oluwaseun34",
+            "Right Femur Fracture Surgery",
+            case_id,
+        );
+
+        assert_eq!(slug, "oluwaseun34-right-femur-fracture-surgery-12345678");
+    }
+
+    #[test]
+    fn public_slug_generation_falls_back_when_text_has_no_slug_content() {
+        let case_id = Uuid::parse_str("abcdef12-3456-7890-abcd-ef1234567890").unwrap();
+        let slug = generate_case_public_slug("!!!", "___", case_id);
+
+        assert_eq!(slug, "case-abcdef12");
+    }
+
+    #[test]
+    fn public_case_link_uses_cases_path() {
+        assert_eq!(
+            public_case_link("oluwaseun34-case-12345678"),
+            "/cases/oluwaseun34-case-12345678"
+        );
     }
 
     #[test]

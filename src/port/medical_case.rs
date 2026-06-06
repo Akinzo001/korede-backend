@@ -14,6 +14,7 @@ pub struct NewMedicalCase {
     pub hospital_id: Uuid,
     pub patient_id: Uuid,
     pub title: String,
+    pub public_slug: String,
     pub diagnosis_summary: String,
     pub bill_amount_kobo: i64,
     pub admitted_at: Option<NaiveDate>,
