@@ -1,6 +1,7 @@
 // Expose the API documentation module.
 pub mod admin;
 pub mod auth;
+pub mod cases;
 pub mod docs;
 pub mod error;
 
@@ -80,6 +81,7 @@ pub fn app(state: AppState) -> Router {
         .route("/health", get(health::health_check))
         // Register GET /health/db.
         .route("/health/db", get(health::database_health_check))
+        .nest("/cases", cases::routes())
         .nest("/api/v1/auth", auth::routes())
         .nest("/api/v1/admin", admin::routes())
         .nest("/api/v1/hospitals", hospitals::routes())

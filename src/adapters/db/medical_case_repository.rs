@@ -208,6 +208,42 @@ impl MedicalCaseRepository for PostgresMedicalCaseRepository {
             .map_err(MedicalCaseRepositoryError::Database)
     }
 
+    async fn find_case_by_public_slug(
+        &self,
+        public_slug: &str,
+    ) -> Result<Option<MedicalCase>, MedicalCaseRepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hospital_id,
+                patient_id,
+                title,
+                public_slug,
+                diagnosis_summary,
+                bill_amount_kobo,
+                amount_raised_kobo,
+                status,
+                blockchain_network,
+                blockchain_tx_digest,
+                blockchain_record_id,
+                admitted_at,
+                created_at,
+                updated_at
+            FROM medical_cases
+            WHERE public_slug = $1
+            LIMIT 1
+            "#,
+        )
+        .bind(public_slug)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| medical_case_from_row(&row))
+            .transpose()
+            .map_err(MedicalCaseRepositoryError::Database)
+    }
+
     async fn patient_has_open_case(
         &self,
         patient_id: Uuid,

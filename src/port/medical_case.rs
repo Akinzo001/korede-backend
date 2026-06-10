@@ -69,6 +69,11 @@ pub trait MedicalCaseRepository: Send + Sync {
         patient_id: Uuid,
     ) -> Result<Vec<MedicalCase>, MedicalCaseRepositoryError>;
 
+    async fn find_case_by_public_slug(
+        &self,
+        public_slug: &str,
+    ) -> Result<Option<MedicalCase>, MedicalCaseRepositoryError>;
+
     async fn patient_has_open_case(
         &self,
         patient_id: Uuid,

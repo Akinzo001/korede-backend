@@ -14,6 +14,7 @@ use crate::api::{
         PatientLoginMedicalCaseResponse, RefreshTokenRequest, RefreshTokenResponse,
         ResetPasswordRequest, ResetPasswordResponse,
     },
+    cases::PublicMedicalCaseResponse,
     health::{DatabaseHealthResponse, HealthResponse},
     hospitals::{
         Base64DocumentRequest, CreateHospitalCaseBillingItemRequest,
@@ -48,6 +49,7 @@ use crate::api::{
     paths(
         crate::api::health::health_check,
         crate::api::health::database_health_check,
+        crate::api::cases::get_case_by_public_slug,
         crate::api::auth::login,
         crate::api::auth::verify_login_otp,
         crate::api::auth::refresh_token,
@@ -76,6 +78,7 @@ use crate::api::{
         schemas(
             HealthResponse,
             DatabaseHealthResponse,
+            PublicMedicalCaseResponse,
             LoginRequest,
             LoginResponse,
             PatientLoginMedicalCaseResponse,
@@ -129,6 +132,7 @@ use crate::api::{
     // Group endpoints into named sections in Swagger UI.
     tags(
         (name = "Health", description = "Endpoints for checking whether the API and database are working."),
+        (name = "Cases", description = "Public medical case pages for donor-facing case links."),
         (name = "Auth", description = "Centralized login endpoints for platform admins and hospitals."),
         (name = "Admin", description = "Super-admin authentication and platform administration endpoints."),
         (name = "Hospitals", description = "Hospital registration, authentication, and KYC endpoints."),
