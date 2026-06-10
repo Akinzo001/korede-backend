@@ -48,6 +48,9 @@ pub enum MedicalCaseRepositoryError {
     #[error("medical case not found")]
     NotFound,
 
+    #[error("patient already has an open medical case")]
+    PatientHasOpenCase,
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -65,4 +68,9 @@ pub trait MedicalCaseRepository: Send + Sync {
         &self,
         patient_id: Uuid,
     ) -> Result<Vec<MedicalCase>, MedicalCaseRepositoryError>;
+
+    async fn patient_has_open_case(
+        &self,
+        patient_id: Uuid,
+    ) -> Result<bool, MedicalCaseRepositoryError>;
 }

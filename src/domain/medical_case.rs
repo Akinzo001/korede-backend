@@ -51,6 +51,27 @@ impl MedicalCaseStatus {
         }
     }
 
+    pub fn is_open(&self) -> bool {
+        matches!(
+            self,
+            Self::Draft
+                | Self::PendingReview
+                | Self::Active
+                | Self::Funded
+                | Self::TreatmentCommenced
+        )
+    }
+
+    pub fn open_status_values() -> &'static [&'static str] {
+        &[
+            "draft",
+            "pending_review",
+            "active",
+            "funded",
+            "treatment_commenced",
+        ]
+    }
+
     pub fn from_str(value: &str) -> Self {
         match value {
             "draft" => Self::Draft,
@@ -118,4 +139,43 @@ pub struct MedicalCase {
 
     // When this case record was last updated.
     pub updated_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_status_rule_blocks_open_lifecycle() {
+        for status in [
+            MedicalCaseStatus::Draft,
+            MedicalCaseStatus::PendingReview,
+            MedicalCaseStatus::Active,
+            MedicalCaseStatus::Funded,
+            MedicalCaseStatus::TreatmentCommenced,
+        ] {
+            assert!(status.is_open());
+        }
+    }
+
+    #[test]
+    fn open_status_rule_allows_terminal_statuses() {
+        for status in [MedicalCaseStatus::Discharged, MedicalCaseStatus::Cancelled] {
+            assert!(!status.is_open());
+        }
+    }
+
+    #[test]
+    fn open_status_values_match_open_lifecycle() {
+        assert_eq!(
+            MedicalCaseStatus::open_status_values(),
+            &[
+                "draft",
+                "pending_review",
+                "active",
+                "funded",
+                "treatment_commenced",
+            ]
+        );
+    }
 }

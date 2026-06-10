@@ -97,6 +97,9 @@ impl From<MedicalCaseRepositoryError> for ApiError {
             MedicalCaseRepositoryError::NotFound => {
                 Self::NotFound("medical case not found".to_owned())
             }
+            MedicalCaseRepositoryError::PatientHasOpenCase => {
+                Self::Conflict("patient already has an open medical case".to_owned())
+            }
             MedicalCaseRepositoryError::Database(error) => {
                 tracing::error!(%error, "database operation failed");
                 Self::Internal("internal server error".to_owned())

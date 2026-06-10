@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row};
 use uuid::Uuid;
 
 use crate::{
@@ -82,7 +82,8 @@ impl MedicalCaseRepository for PostgresMedicalCaseRepository {
         .bind(MedicalCaseStatus::Active.as_str())
         .bind(medical_case.admitted_at)
         .fetch_one(&mut *transaction)
-        .await?;
+        .await
+        .map_err(map_create_case_error)?;
 
         let mut created_billing_items = Vec::with_capacity(billing_items.len());
         for item in billing_items {
@@ -206,6 +207,53 @@ impl MedicalCaseRepository for PostgresMedicalCaseRepository {
             .collect::<Result<Vec<_>, _>>()
             .map_err(MedicalCaseRepositoryError::Database)
     }
+
+    async fn patient_has_open_case(
+        &self,
+        patient_id: Uuid,
+    ) -> Result<bool, MedicalCaseRepositoryError> {
+        patient_has_open_case_in_executor(&self.pool, patient_id).await
+    }
+}
+
+async fn patient_has_open_case_in_executor<'e, E>(
+    executor: E,
+    patient_id: Uuid,
+) -> Result<bool, MedicalCaseRepositoryError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM medical_cases
+            WHERE patient_id = $1
+              AND status = ANY($2)
+        )
+        "#,
+    )
+    .bind(patient_id)
+    .bind(MedicalCaseStatus::open_status_values())
+    .fetch_one(executor)
+    .await?;
+
+    Ok(exists)
+}
+
+fn map_create_case_error(error: sqlx::Error) -> MedicalCaseRepositoryError {
+    if is_open_case_unique_violation(&error) {
+        MedicalCaseRepositoryError::PatientHasOpenCase
+    } else {
+        MedicalCaseRepositoryError::Database(error)
+    }
+}
+
+fn is_open_case_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database_error| database_error.constraint())
+        .is_some_and(|constraint| constraint == "idx_medical_cases_one_open_case_per_patient")
 }
 
 fn medical_case_from_row(row: &sqlx::postgres::PgRow) -> Result<MedicalCase, sqlx::Error> {

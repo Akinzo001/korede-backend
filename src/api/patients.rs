@@ -349,7 +349,8 @@ pub async fn resend_patient_email_otp(
     responses(
         (status = 200, description = "Patient declaration saved.", body = PatientDeclarationResponse),
         (status = 400, description = "Invalid declaration statement."),
-        (status = 401, description = "Missing or invalid patient bearer token.")
+        (status = 401, description = "Missing or invalid patient bearer token."),
+        (status = 409, description = "Patient declaration is locked by an open medical case.")
     )
 )]
 pub async fn upsert_declaration(
@@ -358,6 +359,16 @@ pub async fn upsert_declaration(
     Json(request): Json<UpsertPatientDeclarationRequest>,
 ) -> Result<Json<PatientDeclarationResponse>, ApiError> {
     let statement = validate_declaration_statement(&request.statement)?;
+
+    if state
+        .medical_case_repository
+        .patient_has_open_case(authenticated.patient_id)
+        .await?
+    {
+        return Err(ApiError::Conflict(
+            "patient declaration is locked because an open medical case already exists".to_owned(),
+        ));
+    }
 
     let declaration = state
         .patient_declaration_repository

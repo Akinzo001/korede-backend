@@ -188,6 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // This uses the logging system we configured earlier.
     tracing::info!("Korede backend listening on http://{address}");
+    tracing::info!("Korede swagger docs listening on http://localhost:4000");
 
     // Start serving HTTP requests using Axum.
     //

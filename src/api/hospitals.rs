@@ -1060,10 +1060,16 @@ pub async fn find_patient(
         .find_patient_declaration(patient.id)
         .await?;
 
-    Ok(Json(HospitalPatientLookupResponse::from((
+    let has_open_case = state
+        .medical_case_repository
+        .patient_has_open_case(patient.id)
+        .await?;
+
+    Ok(Json(HospitalPatientLookupResponse::from_parts(
         patient,
         declaration,
-    ))))
+        has_open_case,
+    )))
 }
 
 #[utoipa::path(
@@ -1077,6 +1083,7 @@ pub async fn find_patient(
         (status = 400, description = "Invalid case creation request."),
         (status = 401, description = "Missing or invalid hospital bearer token."),
         (status = 404, description = "Patient was not found."),
+        (status = 409, description = "Patient already has an open medical case."),
         (status = 413, description = "Uploaded document is too large."),
         (status = 415, description = "Unsupported document type.")
     )
@@ -1093,6 +1100,17 @@ pub async fn create_case(
         .find_patient_by_username(&request.patient_username)
         .await?
         .ok_or_else(|| ApiError::NotFound("patient not found".to_owned()))?;
+
+    if state
+        .medical_case_repository
+        .patient_has_open_case(patient.id)
+        .await?
+    {
+        return Err(ApiError::Conflict(
+            "patient already has an open medical case".to_owned(),
+        ));
+    }
+
     let patient_email = patient
         .email
         .clone()
@@ -1112,8 +1130,7 @@ pub async fn create_case(
         })?;
 
     let case_id = Uuid::new_v4();
-    let public_slug =
-        generate_case_public_slug(&request.patient_username, &request.title, case_id);
+    let public_slug = generate_case_public_slug(&request.patient_username, &request.title, case_id);
     let mut stored_documents = Vec::with_capacity(request.documents.len());
 
     for document in &request.documents {
@@ -1639,10 +1656,14 @@ impl From<Patient> for HospitalPatientLookupPatientResponse {
     }
 }
 
-impl From<(Patient, Option<PatientDeclaration>)> for HospitalPatientLookupResponse {
-    fn from((patient, declaration): (Patient, Option<PatientDeclaration>)) -> Self {
+impl HospitalPatientLookupResponse {
+    fn from_parts(
+        patient: Patient,
+        declaration: Option<PatientDeclaration>,
+        has_open_case: bool,
+    ) -> Self {
         let declaration = declaration.map(HospitalPatientLookupDeclarationResponse::from);
-        let can_create_case = declaration.is_some();
+        let can_create_case = declaration.is_some() && !has_open_case;
 
         Self {
             patient: HospitalPatientLookupPatientResponse::from(patient),
@@ -1893,11 +1914,8 @@ mod tests {
     #[test]
     fn public_slug_generation_uses_patient_title_and_uuid_suffix() {
         let case_id = Uuid::parse_str("12345678-90ab-cdef-1234-567890abcdef").unwrap();
-        let slug = generate_case_public_slug(
-            "Oluwaseun34",
-            "Right Femur Fracture Surgery",
-            case_id,
-        );
+        let slug =
+            generate_case_public_slug("Oluwaseun34", "Right Femur Fracture Surgery", case_id);
 
         assert_eq!(slug, "oluwaseun34-right-femur-fracture-surgery-12345678");
     }
