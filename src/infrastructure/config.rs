@@ -192,11 +192,26 @@ pub struct SuiConfig {
 // Settings for payment providers.
 #[derive(Debug, Clone)]
 pub struct PaymentConfig {
+    // Public/base URL of the backend for callback metadata and link generation.
+    pub base_url: String,
+
+    // App display name for donor-facing payment labels.
+    pub app_name: String,
+
     // Paystack secret key.
     //
     // `Option<String>` means this value may or may not exist.
     // It is `Some(value)` when configured and `None` when missing.
     pub paystack_secret_key: Option<String>,
+
+    // Paystack webhook secret for signature verification.
+    pub paystack_webhook_secret: Option<String>,
+
+    // Preferred bank slug for Paystack dedicated virtual accounts.
+    pub paystack_dva_preferred_bank: String,
+
+    // Country code used while creating Paystack dedicated virtual accounts.
+    pub paystack_dva_country: String,
 
     // Flutterwave secret key.
     //
@@ -339,8 +354,15 @@ impl AppConfig {
 
             // Build the nested payment config.
             payments: PaymentConfig {
-                // These are optional because payment integration is not built yet.
+                base_url: optional_env("APP_BASE_URL")
+                    .unwrap_or_else(|| "http://127.0.0.1:4000".to_owned()),
+                app_name: optional_env("APP_NAME").unwrap_or_else(|| "Korede Health".to_owned()),
                 paystack_secret_key: optional_env("PAYSTACK_SECRET_KEY"),
+                paystack_webhook_secret: optional_env("PAYSTACK_WEBHOOK_SECRET"),
+                paystack_dva_preferred_bank: optional_env("PAYSTACK_DVA_PREFERRED_BANK")
+                    .unwrap_or_else(|| "test-bank".to_owned()),
+                paystack_dva_country: optional_env("PAYSTACK_DVA_COUNTRY")
+                    .unwrap_or_else(|| "NG".to_owned()),
                 flutterwave_secret_key: optional_env("FLUTTERWAVE_SECRET_KEY"),
             },
 

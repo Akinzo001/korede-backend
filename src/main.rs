@@ -11,6 +11,7 @@ use korede_backend::{
     adapters::{
         auth::{Argon2PasswordHasher, JwtTokenService},
         db::{
+            donation_repository::PostgresDonationRepository,
             hospital_repository::PostgresHospitalRepository,
             medical_case_repository::PostgresMedicalCaseRepository,
             patient_declaration_repository::PostgresPatientDeclarationRepository,
@@ -18,7 +19,9 @@ use korede_backend::{
             postgres::{connect, run_migrations},
             refresh_token_repository::PostgresRefreshTokenRepository,
         },
+        donation_proof::SuiDonationProofPublisher,
         email::{BrevoEmailService, DisabledEmailService, ResendEmailService},
+        payment::PaystackPaymentGateway,
         storage::{BackblazeDocumentStorage, LocalDocumentStorage},
     },
 
@@ -115,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // That is fine because from this point onward the router owns the state.
     let hospital_repository = Arc::new(PostgresHospitalRepository::new(db_pool.clone()));
     let medical_case_repository = Arc::new(PostgresMedicalCaseRepository::new(db_pool.clone()));
+    let donation_repository = Arc::new(PostgresDonationRepository::new(db_pool.clone()));
     let patient_repository = Arc::new(PostgresPatientRepository::new(db_pool.clone()));
     let patient_declaration_repository =
         Arc::new(PostgresPatientDeclarationRepository::new(db_pool.clone()));
@@ -142,16 +146,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?) as Arc<dyn korede_backend::port::email::EmailService>,
         _ => Arc::new(DisabledEmailService) as Arc<dyn korede_backend::port::email::EmailService>,
     };
+    let payment_gateway = Arc::new(PaystackPaymentGateway::from_config(&config.payments)?)
+        as Arc<dyn korede_backend::port::payment::PaymentGateway>;
+    let donation_proof_publisher = Arc::new(SuiDonationProofPublisher::from_config(&config.sui)?)
+        as Arc<dyn korede_backend::port::sui::DonationProofPublisher>;
 
     let state = AppState {
         db_pool,
         hospital_repository,
         medical_case_repository,
+        donation_repository,
         patient_repository,
         patient_declaration_repository,
         refresh_token_repository,
         password_hasher,
         token_service,
+        payment_gateway,
+        donation_proof_publisher,
         document_storage,
         email_service,
         jwt_expires_in_seconds: config.auth.jwt_expires_in_seconds,
@@ -159,6 +170,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_upload_bytes: config.storage.max_upload_bytes,
         super_admin_email: config.admin.email.clone(),
         super_admin_password: config.admin.password.clone(),
+        app_base_url: config.payments.base_url.clone(),
+        app_name: config.payments.app_name.clone(),
+        paystack_webhook_secret: config.payments.paystack_webhook_secret.clone(),
+        sui_network: config.sui.network.clone(),
     };
 
     // Build the Axum router.

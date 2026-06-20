@@ -9,6 +9,7 @@ pub mod error;
 pub mod health;
 pub mod hospitals;
 pub mod patients;
+pub mod payments;
 pub mod tokens;
 
 // `Router` is Axum's route collection type.
@@ -32,13 +33,16 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::port::{
     auth::{PasswordHasher, TokenService},
+    donation::DonationRepository,
     email::EmailService,
     hospital::HospitalRepository,
     medical_case::MedicalCaseRepository,
     patient::PatientRepository,
     patient_declaration::PatientDeclarationRepository,
+    payment::PaymentGateway,
     refresh_token::RefreshTokenRepository,
     storage::DocumentStorage,
+    sui::DonationProofPublisher,
 };
 
 // `AppState` is data shared with all Axum route handlers.
@@ -53,11 +57,14 @@ pub struct AppState {
 
     pub hospital_repository: Arc<dyn HospitalRepository>,
     pub medical_case_repository: Arc<dyn MedicalCaseRepository>,
+    pub donation_repository: Arc<dyn DonationRepository>,
     pub patient_repository: Arc<dyn PatientRepository>,
     pub patient_declaration_repository: Arc<dyn PatientDeclarationRepository>,
     pub refresh_token_repository: Arc<dyn RefreshTokenRepository>,
     pub password_hasher: Arc<dyn PasswordHasher>,
     pub token_service: Arc<dyn TokenService>,
+    pub payment_gateway: Arc<dyn PaymentGateway>,
+    pub donation_proof_publisher: Arc<dyn DonationProofPublisher>,
     pub document_storage: Arc<dyn DocumentStorage>,
     pub email_service: Arc<dyn EmailService>,
     pub jwt_expires_in_seconds: i64,
@@ -65,6 +72,10 @@ pub struct AppState {
     pub max_upload_bytes: usize,
     pub super_admin_email: String,
     pub super_admin_password: String,
+    pub app_base_url: String,
+    pub app_name: String,
+    pub paystack_webhook_secret: Option<String>,
+    pub sui_network: String,
 }
 
 // Build the full Axum application router.
@@ -82,6 +93,7 @@ pub fn app(state: AppState) -> Router {
         // Register GET /health/db.
         .route("/health/db", get(health::database_health_check))
         .nest("/cases", cases::routes())
+        .nest("/api/v1/payments", payments::routes())
         .nest("/api/v1/auth", auth::routes())
         .nest("/api/v1/admin", admin::routes())
         .nest("/api/v1/hospitals", hospitals::routes())

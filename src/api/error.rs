@@ -6,8 +6,10 @@ use axum::{
 use serde::Serialize;
 
 use crate::port::{
-    hospital::HospitalRepositoryError, medical_case::MedicalCaseRepositoryError,
-    patient::PatientRepositoryError, patient_declaration::PatientDeclarationRepositoryError,
+    donation::DonationRepositoryError, hospital::HospitalRepositoryError,
+    medical_case::MedicalCaseRepositoryError, patient::PatientRepositoryError,
+    patient_declaration::PatientDeclarationRepositoryError, payment::PaymentGatewayError,
+    sui::DonationProofError,
 };
 
 #[derive(Debug, Serialize)]
@@ -104,6 +106,52 @@ impl From<MedicalCaseRepositoryError> for ApiError {
                 tracing::error!(%error, "database operation failed");
                 Self::Internal("internal server error".to_owned())
             }
+        }
+    }
+}
+
+impl From<DonationRepositoryError> for ApiError {
+    fn from(error: DonationRepositoryError) -> Self {
+        match error {
+            DonationRepositoryError::NotFound => Self::NotFound("donation not found".to_owned()),
+            DonationRepositoryError::DuplicateReference => {
+                Self::Conflict("donation reference already exists".to_owned())
+            }
+            DonationRepositoryError::AmountExceedsRemaining => {
+                Self::Conflict("payment amount exceeds the remaining case amount".to_owned())
+            }
+            DonationRepositoryError::Database(error) => {
+                tracing::error!(%error, "database operation failed");
+                Self::Internal("internal server error".to_owned())
+            }
+        }
+    }
+}
+
+impl From<PaymentGatewayError> for ApiError {
+    fn from(error: PaymentGatewayError) -> Self {
+        match error {
+            PaymentGatewayError::MissingConfig(_) => {
+                Self::Internal("payment configuration is incomplete".to_owned())
+            }
+            PaymentGatewayError::RequestFailed => {
+                Self::Internal("failed to contact payment provider".to_owned())
+            }
+            PaymentGatewayError::Provider(message) => Self::BadRequest(message),
+        }
+    }
+}
+
+impl From<DonationProofError> for ApiError {
+    fn from(error: DonationProofError) -> Self {
+        match error {
+            DonationProofError::MissingConfig(_) => {
+                Self::Internal("sui proof configuration is incomplete".to_owned())
+            }
+            DonationProofError::PublishFailed => {
+                Self::Internal("failed to publish donation proof".to_owned())
+            }
+            DonationProofError::Provider(message) => Self::Internal(message),
         }
     }
 }
