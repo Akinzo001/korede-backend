@@ -67,4 +67,5 @@ pub struct HospitalDocument {
     pub status: HospitalDocumentStatus,
     pub uploaded_at: DateTime<Utc>,
     pub reviewed_at: Option<DateTime<Utc>>,
+    pub review_message: Option<String>,
 }

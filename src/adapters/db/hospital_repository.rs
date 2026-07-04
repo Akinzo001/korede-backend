@@ -14,8 +14,9 @@ use crate::{
         hospital_password_reset_otp::HospitalPasswordResetOtp,
     },
     port::hospital::{
-        HospitalRepository, HospitalRepositoryError, NewHospital, NewHospitalAuditLog,
-        NewHospitalDocument, NewHospitalEmailOtp, NewHospitalLoginOtp, NewHospitalPasswordResetOtp,
+        HospitalDocumentReview, HospitalRepository, HospitalRepositoryError, NewHospital,
+        NewHospitalAuditLog, NewHospitalDocument, NewHospitalEmailOtp, NewHospitalLoginOtp,
+        NewHospitalPasswordResetOtp,
     },
 };
 
@@ -262,7 +263,8 @@ impl HospitalRepository for PostgresHospitalRepository {
                 file_size_bytes,
                 status,
                 uploaded_at,
-                reviewed_at
+                reviewed_at,
+                review_message
             "#,
         )
         .bind(id)
@@ -296,7 +298,8 @@ impl HospitalRepository for PostgresHospitalRepository {
                 file_size_bytes,
                 status,
                 uploaded_at,
-                reviewed_at
+                reviewed_at,
+                review_message
             FROM hospital_documents
             WHERE hospital_id = $1
             ORDER BY uploaded_at DESC
@@ -310,6 +313,92 @@ impl HospitalRepository for PostgresHospitalRepository {
             .map(document_from_row)
             .collect::<Result<Vec<_>, _>>()
             .map_err(HospitalRepositoryError::Database)
+    }
+
+    async fn review_hospital_document(
+        &self,
+        hospital_id: Uuid,
+        document_id: Uuid,
+        review: HospitalDocumentReview,
+    ) -> Result<HospitalDocument, HospitalRepositoryError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE hospital_documents
+            SET status = $3,
+                reviewed_at = NOW(),
+                review_message = $4
+            WHERE hospital_id = $1
+              AND id = $2
+            RETURNING
+                id,
+                hospital_id,
+                document_type,
+                storage_provider,
+                storage_key,
+                original_filename,
+                mime_type,
+                file_size_bytes,
+                status,
+                uploaded_at,
+                reviewed_at,
+                review_message
+            "#,
+        )
+        .bind(hospital_id)
+        .bind(document_id)
+        .bind(review.status.as_str())
+        .bind(review.review_message)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Err(HospitalRepositoryError::NotFound);
+        };
+
+        document_from_row(&row).map_err(HospitalRepositoryError::Database)
+    }
+
+    async fn update_hospital_verification_status(
+        &self,
+        hospital_id: Uuid,
+        status: HospitalVerificationStatus,
+    ) -> Result<Hospital, HospitalRepositoryError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE hospitals
+            SET verification_status = $2,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING
+                id,
+                name,
+                email,
+                email_verified,
+                email_verified_at,
+                password_hash,
+                phone_number,
+                official_address,
+                administrator_name,
+                cac_registration_number,
+                medical_license_number,
+                corporate_account_name,
+                corporate_account_number,
+                bank_name,
+                verification_status,
+                created_at,
+                updated_at
+            "#,
+        )
+        .bind(hospital_id)
+        .bind(status.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Err(HospitalRepositoryError::NotFound);
+        };
+
+        hospital_from_row(&row).map_err(HospitalRepositoryError::Database)
     }
 
     async fn create_email_otp(
@@ -894,6 +983,7 @@ fn document_from_row(row: &sqlx::postgres::PgRow) -> Result<HospitalDocument, sq
         status: document_status_from_str(row.try_get("status")?),
         uploaded_at: row.try_get::<DateTime<Utc>, _>("uploaded_at")?,
         reviewed_at: row.try_get("reviewed_at")?,
+        review_message: row.try_get("review_message")?,
     })
 }
 

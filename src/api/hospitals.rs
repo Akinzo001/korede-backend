@@ -184,6 +184,7 @@ pub struct HospitalDocumentResponse {
     pub file_size_bytes: i64,
     pub uploaded_at: DateTime<Utc>,
     pub reviewed_at: Option<DateTime<Utc>>,
+    pub review_message: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1628,6 +1629,7 @@ impl From<HospitalDocument> for HospitalDocumentResponse {
             file_size_bytes: document.file_size_bytes,
             uploaded_at: document.uploaded_at,
             reviewed_at: document.reviewed_at,
+            review_message: document.review_message,
         }
     }
 }

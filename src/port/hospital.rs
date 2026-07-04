@@ -3,8 +3,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::{
-    hospital::Hospital,
-    hospital_document::{HospitalDocument, HospitalDocumentType},
+    hospital::{Hospital, HospitalVerificationStatus},
+    hospital_document::{HospitalDocument, HospitalDocumentStatus, HospitalDocumentType},
     hospital_email_otp::HospitalEmailOtp,
     hospital_login_otp::HospitalLoginOtp,
     hospital_password_reset_otp::HospitalPasswordResetOtp,
@@ -72,6 +72,12 @@ pub struct NewHospitalAuditLog {
     pub metadata: serde_json::Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct HospitalDocumentReview {
+    pub status: HospitalDocumentStatus,
+    pub review_message: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum HospitalRepositoryError {
     #[error("hospital email already exists")]
@@ -112,6 +118,19 @@ pub trait HospitalRepository: Send + Sync {
         &self,
         hospital_id: Uuid,
     ) -> Result<Vec<HospitalDocument>, HospitalRepositoryError>;
+
+    async fn review_hospital_document(
+        &self,
+        hospital_id: Uuid,
+        document_id: Uuid,
+        review: HospitalDocumentReview,
+    ) -> Result<HospitalDocument, HospitalRepositoryError>;
+
+    async fn update_hospital_verification_status(
+        &self,
+        hospital_id: Uuid,
+        status: HospitalVerificationStatus,
+    ) -> Result<Hospital, HospitalRepositoryError>;
 
     async fn create_email_otp(
         &self,

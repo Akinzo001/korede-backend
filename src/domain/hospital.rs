@@ -32,6 +32,17 @@ pub enum HospitalVerificationStatus {
     Suspended,
 }
 
+impl HospitalVerificationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Verified => "verified",
+            Self::Rejected => "rejected",
+            Self::Suspended => "suspended",
+        }
+    }
+}
+
 // Domain model for a hospital.
 //
 // This is a pure business object. It does not know about SQLx, Axum,
