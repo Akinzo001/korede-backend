@@ -1083,6 +1083,7 @@ pub async fn find_patient(
         (status = 200, description = "Case created and published successfully.", body = CreateHospitalCaseResponse),
         (status = 400, description = "Invalid case creation request."),
         (status = 401, description = "Missing or invalid hospital bearer token."),
+        (status = 403, description = "Hospital must be verified before creating medical cases."),
         (status = 404, description = "Patient was not found."),
         (status = 409, description = "Patient already has an open medical case."),
         (status = 413, description = "Uploaded document is too large."),
@@ -1095,6 +1096,13 @@ pub async fn create_case(
     Json(request): Json<CreateHospitalCaseRequest>,
 ) -> Result<Json<CreateHospitalCaseResponse>, ApiError> {
     validate_create_case_request(&request)?;
+
+    let hospital = state
+        .hospital_repository
+        .find_hospital_by_id(authenticated.hospital_id)
+        .await?
+        .ok_or(HospitalRepositoryError::NotFound)?;
+    ensure_hospital_can_create_case(&hospital)?;
 
     let patient = state
         .patient_repository
@@ -1116,11 +1124,6 @@ pub async fn create_case(
         .email
         .clone()
         .ok_or_else(|| ApiError::BadRequest("patient email is required".to_owned()))?;
-    let hospital = state
-        .hospital_repository
-        .find_hospital_by_id(authenticated.hospital_id)
-        .await?
-        .ok_or(HospitalRepositoryError::NotFound)?;
 
     let declaration = state
         .patient_declaration_repository
@@ -1497,6 +1500,16 @@ fn dashboard_access_for(hospital: &Hospital) -> &'static str {
         HospitalVerificationStatus::Verified => "full",
         _ => "pending_review",
     }
+}
+
+fn ensure_hospital_can_create_case(hospital: &Hospital) -> Result<(), ApiError> {
+    if hospital.verification_status == HospitalVerificationStatus::Verified {
+        return Ok(());
+    }
+
+    Err(ApiError::Forbidden(
+        "hospital must be verified before creating medical cases".to_owned(),
+    ))
 }
 
 fn decode_base64_document(
@@ -1981,5 +1994,42 @@ mod tests {
         let hospital = hospital_with_status(HospitalVerificationStatus::Verified);
 
         assert_eq!(dashboard_access_for(&hospital), "full");
+    }
+
+    #[test]
+    fn verified_hospital_can_create_case() {
+        let hospital = hospital_with_status(HospitalVerificationStatus::Verified);
+
+        assert!(ensure_hospital_can_create_case(&hospital).is_ok());
+    }
+
+    #[test]
+    fn pending_hospital_cannot_create_case() {
+        let hospital = hospital_with_status(HospitalVerificationStatus::Pending);
+
+        assert!(matches!(
+            ensure_hospital_can_create_case(&hospital),
+            Err(ApiError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn rejected_hospital_cannot_create_case() {
+        let hospital = hospital_with_status(HospitalVerificationStatus::Rejected);
+
+        assert!(matches!(
+            ensure_hospital_can_create_case(&hospital),
+            Err(ApiError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn suspended_hospital_cannot_create_case() {
+        let hospital = hospital_with_status(HospitalVerificationStatus::Suspended);
+
+        assert!(matches!(
+            ensure_hospital_can_create_case(&hospital),
+            Err(ApiError::Forbidden(_))
+        ));
     }
 }
