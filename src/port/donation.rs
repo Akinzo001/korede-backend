@@ -1,9 +1,10 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::{
-    donation::{Donation, DonationStatus},
+    donation::{CaseDva, Donation, DonationMethod, DonationProofStatus, DonationStatus},
     medical_case::MedicalCase,
     public_case::PublicCaseDetails,
 };
@@ -14,6 +15,7 @@ pub struct NewDonation {
     pub donor_display_name: String,
     pub donor_email: String,
     pub amount_kobo: i64,
+    pub method: DonationMethod,
     pub paystack_reference: String,
     pub paystack_transaction_reference: Option<String>,
     pub paystack_access_code: Option<String>,
@@ -27,13 +29,43 @@ pub struct NewDonation {
 }
 
 #[derive(Debug, Clone)]
+pub struct UpsertCaseDva {
+    pub medical_case_id: Uuid,
+    pub paystack_reference: String,
+    pub paystack_customer_code: Option<String>,
+    pub paystack_dedicated_account_id: i64,
+    pub account_number: String,
+    pub account_name: String,
+    pub bank_name: String,
+    pub bank_slug: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DonationPaymentUpdate {
     pub donation_id: Uuid,
     pub paystack_transaction_reference: String,
-    pub paid_at: chrono::DateTime<chrono::Utc>,
-    pub proof_status: crate::domain::donation::DonationProofStatus,
+    pub paid_at: DateTime<Utc>,
+    pub proof_status: DonationProofStatus,
     pub sui_network: Option<String>,
     pub sui_tx_digest: Option<String>,
+    pub proof_attempt_count: i32,
+    pub proof_last_attempt_at: Option<DateTime<Utc>>,
+    pub proof_next_retry_at: Option<DateTime<Utc>>,
+    pub proof_last_error: Option<String>,
+    pub proof_published_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DonationProofAttemptUpdate {
+    pub donation_id: Uuid,
+    pub proof_status: DonationProofStatus,
+    pub sui_network: Option<String>,
+    pub sui_tx_digest: Option<String>,
+    pub proof_attempt_count: i32,
+    pub proof_last_attempt_at: DateTime<Utc>,
+    pub proof_next_retry_at: Option<DateTime<Utc>>,
+    pub proof_last_error: Option<String>,
+    pub proof_published_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +79,12 @@ pub struct DonationCaseLock {
     pub donation: Donation,
     pub medical_case: MedicalCase,
     pub remaining_amount_kobo: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DonationProofJob {
+    pub donation: Donation,
+    pub medical_case: MedicalCase,
 }
 
 #[derive(Debug, Error)]
@@ -71,6 +109,12 @@ pub trait DonationRepository: Send + Sync {
         donation: NewDonation,
     ) -> Result<Donation, DonationRepositoryError>;
 
+    async fn create_paid_donation(
+        &self,
+        donation: NewDonation,
+        paid_at: DateTime<Utc>,
+    ) -> Result<Donation, DonationRepositoryError>;
+
     async fn find_donation_by_reference(
         &self,
         paystack_reference: &str,
@@ -80,6 +124,30 @@ pub trait DonationRepository: Send + Sync {
         &self,
         public_slug: &str,
     ) -> Result<Option<PublicCaseDetails>, DonationRepositoryError>;
+
+    async fn get_public_case_details_for_case_id(
+        &self,
+        medical_case_id: Uuid,
+    ) -> Result<Option<PublicCaseDetails>, DonationRepositoryError>;
+
+    async fn find_case_dva(
+        &self,
+        medical_case_id: Uuid,
+    ) -> Result<Option<CaseDva>, DonationRepositoryError>;
+
+    async fn find_case_dva_by_account_number(
+        &self,
+        account_number: &str,
+    ) -> Result<Option<CaseDva>, DonationRepositoryError>;
+
+    async fn upsert_case_dva(&self, dva: UpsertCaseDva)
+        -> Result<CaseDva, DonationRepositoryError>;
+
+    async fn deactivate_case_dva(
+        &self,
+        medical_case_id: Uuid,
+        deactivation_error: Option<String>,
+    ) -> Result<Option<CaseDva>, DonationRepositoryError>;
 
     async fn lock_pending_donation_for_confirmation(
         &self,
@@ -95,6 +163,17 @@ pub trait DonationRepository: Send + Sync {
         &self,
         update: DonationPaymentUpdate,
     ) -> Result<Donation, DonationRepositoryError>;
+
+    async fn update_donation_proof(
+        &self,
+        update: DonationProofAttemptUpdate,
+    ) -> Result<Donation, DonationRepositoryError>;
+
+    async fn acquire_retryable_proof_jobs(
+        &self,
+        batch_size: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<DonationProofJob>, DonationRepositoryError>;
 
     async fn mark_donation_failed(
         &self,

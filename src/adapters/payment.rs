@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::{
     infrastructure::config::PaymentConfig,
     port::payment::{
-        PaymentGateway, PaymentGatewayError, PaymentInitialization, PaymentInitializationRequest,
-        PaymentVerification, PaymentVerificationStatus,
+        CheckoutInitialization, CheckoutInitializationRequest, DvaAssignment, DvaAssignmentRequest,
+        PaymentGateway, PaymentGatewayError, PaymentVerification, PaymentVerificationStatus,
     },
 };
 
@@ -16,8 +16,10 @@ pub struct PaystackPaymentGateway {
     client: Client,
     secret_key: String,
     preferred_bank: String,
-    country: String,
 }
+
+#[derive(Debug, Clone)]
+pub struct DisabledPaymentGateway;
 
 #[derive(Debug, Serialize)]
 struct PaystackCreateCustomerRequest<'a> {
@@ -25,6 +27,16 @@ struct PaystackCreateCustomerRequest<'a> {
     first_name: &'a str,
     last_name: &'a str,
     metadata: PaystackMetadata<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct PaystackCheckoutInitializeRequest<'a> {
+    email: &'a str,
+    amount: i64,
+    reference: &'a str,
+    callback_url: &'a str,
+    metadata: PaystackMetadata<'a>,
+    channels: Vec<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,12 +49,9 @@ struct PaystackMetadata<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct PaystackDedicatedAccountRequest<'a> {
+struct PaystackDedicatedAccountCreateRequest<'a> {
     customer: &'a str,
     preferred_bank: &'a str,
-    country: &'a str,
-    first_name: &'a str,
-    last_name: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,12 +67,24 @@ struct PaystackCustomerResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct PaystackCheckoutInitializeResponse {
+    authorization_url: String,
+    access_code: String,
+    reference: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct PaystackDedicatedAccountResponse {
     id: i64,
     account_name: String,
     account_number: String,
     bank: PaystackBank,
     customer: Option<PaystackCustomerResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaystackDeactivateDedicatedAccountResponse {
+    assigned: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +102,10 @@ struct PaystackVerifyResponse {
 }
 
 impl PaystackPaymentGateway {
+    pub fn is_configured(config: &PaymentConfig) -> bool {
+        config.paystack_secret_key.is_some()
+    }
+
     pub fn from_config(config: &PaymentConfig) -> Result<Self, PaymentGatewayError> {
         let secret_key = config
             .paystack_secret_key
@@ -91,26 +116,29 @@ impl PaystackPaymentGateway {
             client: Client::new(),
             secret_key,
             preferred_bank: config.paystack_dva_preferred_bank.clone(),
-            country: config.paystack_dva_country.clone(),
         })
     }
 
     async fn ensure_customer_code(
         &self,
-        request: &PaymentInitializationRequest,
-        first_name: &str,
-        last_name: &str,
+        email: &str,
+        donor_display_name: &str,
+        payment_label: &str,
+        case_public_slug: &str,
+        case_title: &str,
+        donation_reference: &str,
     ) -> Result<String, PaymentGatewayError> {
+        let (first_name, last_name) = split_payment_label(payment_label);
         let payload = PaystackCreateCustomerRequest {
-            email: &request.donor_email,
-            first_name,
-            last_name,
+            email,
+            first_name: &first_name,
+            last_name: &last_name,
             metadata: PaystackMetadata {
-                donor_name: &request.donor_display_name,
-                case_public_slug: &request.case_public_slug,
-                case_title: &request.case_title,
-                payment_label: &request.payment_label,
-                donation_reference: &request.reference,
+                donor_name: donor_display_name,
+                case_public_slug,
+                case_title,
+                payment_label,
+                donation_reference,
             },
         };
 
@@ -138,10 +166,7 @@ impl PaystackPaymentGateway {
 
         let fallback = self
             .client
-            .get(format!(
-                "https://api.paystack.co/customer/{}",
-                request.donor_email
-            ))
+            .get(format!("https://api.paystack.co/customer/{email}"))
             .bearer_auth(&self.secret_key)
             .send()
             .await
@@ -168,20 +193,74 @@ impl PaystackPaymentGateway {
 
 #[async_trait]
 impl PaymentGateway for PaystackPaymentGateway {
-    async fn initialize_payment(
+    async fn initialize_checkout(
         &self,
-        request: PaymentInitializationRequest,
-    ) -> Result<PaymentInitialization, PaymentGatewayError> {
-        let (first_name, last_name) = split_payment_label(&request.payment_label);
+        request: CheckoutInitializationRequest,
+    ) -> Result<CheckoutInitialization, PaymentGatewayError> {
+        let payload = PaystackCheckoutInitializeRequest {
+            email: &request.donor_email,
+            amount: request.amount_kobo,
+            reference: &request.reference,
+            callback_url: &request.callback_url,
+            metadata: PaystackMetadata {
+                donor_name: &request.donor_display_name,
+                case_public_slug: &request.case_public_slug,
+                case_title: &request.case_title,
+                payment_label: &request.case_title,
+                donation_reference: &request.reference,
+            },
+            channels: vec!["card", "bank", "ussd", "bank_transfer"],
+        };
+
+        let response = self
+            .client
+            .post("https://api.paystack.co/transaction/initialize")
+            .bearer_auth(&self.secret_key)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|_| PaymentGatewayError::RequestFailed)?;
+
+        if !response.status().is_success() {
+            return Err(PaymentGatewayError::Provider(
+                response.text().await.unwrap_or_default(),
+            ));
+        }
+
+        let envelope: PaystackEnvelope<PaystackCheckoutInitializeResponse> = response
+            .json()
+            .await
+            .map_err(|_| PaymentGatewayError::RequestFailed)?;
+
+        if !envelope.status {
+            return Err(PaymentGatewayError::Provider(envelope.message));
+        }
+
+        Ok(CheckoutInitialization {
+            provider_reference: envelope.data.reference,
+            authorization_url: envelope.data.authorization_url,
+            access_code: envelope.data.access_code,
+        })
+    }
+
+    async fn ensure_case_dva(
+        &self,
+        request: DvaAssignmentRequest,
+    ) -> Result<DvaAssignment, PaymentGatewayError> {
         let customer_code = self
-            .ensure_customer_code(&request, &first_name, &last_name)
+            .ensure_customer_code(
+                &request.customer_email,
+                "Anonymous",
+                &request.payment_label,
+                &request.case_public_slug,
+                &request.case_title,
+                &request.reference,
+            )
             .await?;
-        let payload = PaystackDedicatedAccountRequest {
+
+        let payload = PaystackDedicatedAccountCreateRequest {
             customer: &customer_code,
             preferred_bank: &self.preferred_bank,
-            country: &self.country,
-            first_name: &first_name,
-            last_name: &last_name,
         };
 
         let response = self
@@ -208,19 +287,49 @@ impl PaymentGateway for PaystackPaymentGateway {
             return Err(PaymentGatewayError::Provider(envelope.message));
         }
 
-        Ok(PaymentInitialization {
+        Ok(DvaAssignment {
             provider_reference: request.reference,
             customer_code: envelope
                 .data
                 .customer
                 .map(|customer| customer.customer_code)
                 .or(Some(customer_code)),
-            dedicated_account_id: Some(envelope.data.id),
+            dedicated_account_id: envelope.data.id,
             bank_name: envelope.data.bank.name,
             bank_slug: envelope.data.bank.slug,
             account_name: envelope.data.account_name,
             account_number: envelope.data.account_number,
         })
+    }
+
+    async fn deactivate_dva(&self, dedicated_account_id: i64) -> Result<(), PaymentGatewayError> {
+        let response = self
+            .client
+            .delete(format!(
+                "https://api.paystack.co/dedicated_account/{dedicated_account_id}"
+            ))
+            .bearer_auth(&self.secret_key)
+            .send()
+            .await
+            .map_err(|_| PaymentGatewayError::RequestFailed)?;
+
+        if !response.status().is_success() {
+            return Err(PaymentGatewayError::Provider(
+                response.text().await.unwrap_or_default(),
+            ));
+        }
+
+        let envelope: PaystackEnvelope<PaystackDeactivateDedicatedAccountResponse> = response
+            .json()
+            .await
+            .map_err(|_| PaymentGatewayError::RequestFailed)?;
+
+        if !envelope.status {
+            return Err(PaymentGatewayError::Provider(envelope.message));
+        }
+
+        let _ = envelope.data.assigned;
+        Ok(())
     }
 
     async fn verify_payment(
@@ -278,6 +387,38 @@ impl PaymentGateway for PaystackPaymentGateway {
     }
 }
 
+#[async_trait]
+impl PaymentGateway for DisabledPaymentGateway {
+    async fn initialize_checkout(
+        &self,
+        _request: CheckoutInitializationRequest,
+    ) -> Result<CheckoutInitialization, PaymentGatewayError> {
+        Err(PaymentGatewayError::MissingConfig("PAYSTACK_SECRET_KEY"))
+    }
+
+    async fn ensure_case_dva(
+        &self,
+        _request: DvaAssignmentRequest,
+    ) -> Result<DvaAssignment, PaymentGatewayError> {
+        Err(PaymentGatewayError::MissingConfig("PAYSTACK_SECRET_KEY"))
+    }
+
+    async fn deactivate_dva(&self, _dedicated_account_id: i64) -> Result<(), PaymentGatewayError> {
+        Err(PaymentGatewayError::MissingConfig("PAYSTACK_SECRET_KEY"))
+    }
+
+    async fn verify_payment(
+        &self,
+        _reference: &str,
+    ) -> Result<PaymentVerification, PaymentGatewayError> {
+        Err(PaymentGatewayError::MissingConfig("PAYSTACK_SECRET_KEY"))
+    }
+
+    fn generate_reference(&self) -> String {
+        format!("korede-disabled-{}", Uuid::new_v4().simple())
+    }
+}
+
 fn split_payment_label(label: &str) -> (String, String) {
     let trimmed = label.trim();
     if trimmed.is_empty() {
@@ -321,5 +462,22 @@ mod tests {
 
         assert_eq!(first_name, "SingleLabel");
         assert_eq!(last_name, "Patient");
+    }
+
+    #[test]
+    fn paystack_gateway_reports_configured_only_when_secret_exists() {
+        let mut config = crate::infrastructure::config::PaymentConfig {
+            base_url: "http://127.0.0.1:4000".to_owned(),
+            app_name: "Korede Health".to_owned(),
+            paystack_secret_key: None,
+            paystack_webhook_secret: None,
+            paystack_dva_preferred_bank: "test-bank".to_owned(),
+            paystack_dva_country: "NG".to_owned(),
+            flutterwave_secret_key: None,
+        };
+
+        assert!(!super::PaystackPaymentGateway::is_configured(&config));
+        config.paystack_secret_key = Some("sk_test_example".to_owned());
+        assert!(super::PaystackPaymentGateway::is_configured(&config));
     }
 }

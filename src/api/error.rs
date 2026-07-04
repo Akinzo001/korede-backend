@@ -26,6 +26,7 @@ pub enum ApiError {
     Conflict(String),
     PayloadTooLarge(String),
     UnsupportedMediaType(String),
+    ServiceUnavailable(String),
     Internal(String),
 }
 
@@ -39,6 +40,7 @@ impl IntoResponse for ApiError {
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::PayloadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message),
             Self::UnsupportedMediaType(message) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, message),
+            Self::ServiceUnavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
             Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
         };
 
@@ -132,7 +134,7 @@ impl From<PaymentGatewayError> for ApiError {
     fn from(error: PaymentGatewayError) -> Self {
         match error {
             PaymentGatewayError::MissingConfig(_) => {
-                Self::Internal("payment configuration is incomplete".to_owned())
+                Self::ServiceUnavailable("payment provider is not configured".to_owned())
             }
             PaymentGatewayError::RequestFailed => {
                 Self::Internal("failed to contact payment provider".to_owned())
@@ -146,7 +148,7 @@ impl From<DonationProofError> for ApiError {
     fn from(error: DonationProofError) -> Self {
         match error {
             DonationProofError::MissingConfig(_) => {
-                Self::Internal("sui proof configuration is incomplete".to_owned())
+                Self::ServiceUnavailable("sui proof provider is not configured".to_owned())
             }
             DonationProofError::PublishFailed => {
                 Self::Internal("failed to publish donation proof".to_owned())

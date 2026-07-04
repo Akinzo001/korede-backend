@@ -34,6 +34,22 @@ After publishing, copy the package ID into your backend environment:
 
 ```env
 SUI_PACKAGE_ID=0x...
+SUI_ADMIN_ADDRESS=0x...
+SUI_KEYSTORE_PATH=/path/to/sui.keystore
+SUI_CLOCK_OBJECT_ID=0x6
+SUI_REQUEST_TIMEOUT_SECONDS=30
 ```
 
-The backend does not need Sui CLI until a later task adds transaction submission.
+## Backend Proof Publishing
+
+The backend now submits donation proof transactions through the local `sui` CLI.
+
+For local backend development, leave `SUI_PACKAGE_ID`, `SUI_ADMIN_ADDRESS`, and
+`SUI_KEYSTORE_PATH` blank. The backend will still start, confirmed donations will
+remain recorded in PostgreSQL, and proof publishing will be unavailable until
+Sui configuration is provided.
+
+For an environment that should publish proofs, install the Sui CLI on the host
+running the backend, configure the admin address in the keystore, and set the
+Sui environment variables above. Failed proof submissions are retried by the
+backend worker using the retry state stored on each donation.

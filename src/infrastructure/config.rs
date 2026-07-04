@@ -8,287 +8,129 @@ use std::{env, net::SocketAddr};
 // without manually writing a lot of error-handling boilerplate.
 use thiserror::Error;
 
-// `AppConfig` is the top-level configuration object for the whole app.
-//
-// Instead of reading environment variables everywhere in the codebase,
-// we read them once here and pass around this typed config.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    // Server-related settings, like host and port.
     pub server: ServerConfig,
-
-    // Database-related settings, like the PostgreSQL URL.
     pub database: DatabaseConfig,
-
-    // Authentication-related settings, like JWT secret.
     pub auth: AuthConfig,
-
-    // Super-admin credentials for platform administration.
     pub admin: AdminConfig,
-
-    // Sui-related settings, like RPC URL and package ID.
     pub sui: SuiConfig,
-
-    // Payment provider settings, like Paystack or Flutterwave keys.
     pub payments: PaymentConfig,
-
-    // Upload/storage settings for KYC documents.
     pub storage: StorageConfig,
-
-    // Email settings for transactional notifications.
     pub email: EmailConfig,
 }
 
-// Settings for the HTTP server.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    // The network host the app should listen on.
-    //
-    // Local development usually uses 127.0.0.1.
-    // Cloud deployment usually uses 0.0.0.0.
     pub host: String,
-
-    // The TCP port the app should listen on.
-    //
-    // Example: 4000 means http://127.0.0.1:4000 locally.
     pub port: u16,
 }
 
-// Settings for PostgreSQL.
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
-    // The full PostgreSQL connection URL.
-    //
-    // Example:
-    // postgres://user:password@host:port/database?sslmode=require
     pub url: String,
 }
 
-// Settings for authentication.
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
-    // Secret used later to sign and verify JWT tokens.
-    //
-    // This must be private in production.
     pub jwt_secret: String,
-
-    // Number of seconds before issued JWTs expire.
     pub jwt_expires_in_seconds: i64,
-
-    // Number of seconds before issued refresh tokens expire.
     pub refresh_token_expires_in_seconds: i64,
 }
 
-// Settings for the platform super-admin account.
 #[derive(Debug, Clone)]
 pub struct AdminConfig {
-    // Super-admin login email.
     pub email: String,
-
-    // Super-admin login password.
     pub password: String,
 }
 
-// Settings for document storage.
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
-    // Storage provider selected for uploads.
-    //
-    // This phase implements local storage. S3 can be added later.
     pub provider: String,
-
-    // Local directory where uploaded documents are stored.
     pub local_root: String,
-
-    // Maximum accepted upload size in bytes.
     pub max_upload_bytes: usize,
-
-    // Backblaze B2 settings for the S3-compatible storage adapter.
     pub backblaze: BackblazeConfig,
 }
 
-// Settings for Backblaze B2 S3-compatible object storage.
 #[derive(Debug, Clone)]
 pub struct BackblazeConfig {
-    // Backblaze bucket where KYC documents will be stored.
     pub bucket: Option<String>,
-
-    // S3-compatible Backblaze endpoint.
-    //
-    // Example:
-    // https://s3.eu-central-003.backblazeb2.com
     pub endpoint: Option<String>,
-
-    // Backblaze application key ID.
     pub access_key_id: Option<String>,
-
-    // Backblaze application key.
     pub secret_access_key: Option<String>,
-
-    // Backblaze S3-compatible region.
     pub region: String,
 }
 
-// Settings for outbound transactional email.
 #[derive(Debug, Clone)]
 pub struct EmailConfig {
-    // Email provider selected at runtime.
-    //
-    // Supported values:
-    // - disabled
-    // - brevo
-    // - resend
     pub provider: String,
-
-    // Email address used as the sender.
     pub from_email: Option<String>,
-
-    // Display name used as the sender.
     pub from_name: Option<String>,
-
-    // Brevo-specific settings.
     pub brevo: BrevoConfig,
-
-    // Resend-specific settings.
     pub resend: ResendConfig,
 }
 
-// Settings for Brevo's transactional email API.
 #[derive(Debug, Clone)]
 pub struct BrevoConfig {
-    // Brevo SMTP/API key.
     pub api_key: Option<String>,
 }
 
-// Settings for Resend's transactional email API.
 #[derive(Debug, Clone)]
 pub struct ResendConfig {
-    // Resend API key.
     pub api_key: Option<String>,
 }
 
-// Settings for Sui.
 #[derive(Debug, Clone)]
 pub struct SuiConfig {
-    // Sui network label.
     pub network: String,
-
-    // The RPC endpoint the backend will use when talking to Sui.
     pub rpc_url: String,
-
-    // Published Sui package ID.
     pub package_id: Option<String>,
-
-    // Platform/admin Sui address.
     pub admin_address: Option<String>,
-
-    // Path to Sui keystore for future backend transaction signing.
     pub keystore_path: Option<String>,
-
-    // Default gas budget for future Sui transactions.
     pub gas_budget: u64,
+    pub clock_object_id: String,
+    pub request_timeout_seconds: u64,
 }
 
-// Settings for payment providers.
 #[derive(Debug, Clone)]
 pub struct PaymentConfig {
-    // Public/base URL of the backend for callback metadata and link generation.
     pub base_url: String,
-
-    // App display name for donor-facing payment labels.
     pub app_name: String,
-
-    // Paystack secret key.
-    //
-    // `Option<String>` means this value may or may not exist.
-    // It is `Some(value)` when configured and `None` when missing.
     pub paystack_secret_key: Option<String>,
-
-    // Paystack webhook secret for signature verification.
     pub paystack_webhook_secret: Option<String>,
-
-    // Preferred bank slug for Paystack dedicated virtual accounts.
     pub paystack_dva_preferred_bank: String,
-
-    // Country code used while creating Paystack dedicated virtual accounts.
     pub paystack_dva_country: String,
-
-    // Flutterwave secret key.
-    //
-    // Also optional because you may not integrate every provider immediately.
     pub flutterwave_secret_key: Option<String>,
 }
 
-// Errors that can happen while loading config.
-//
-// `Debug` helps Rust print the error while debugging.
-// `Error` comes from `thiserror` and turns this enum into a real error type.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    // This error is used when a required environment variable is missing.
-    //
-    // `{0}` means "print the first value inside this enum variant".
     #[error("missing required environment variable: {0}")]
     MissingVariable(&'static str),
 
-    // This error is used when APP_PORT/PORT exists but is not a valid number.
     #[error("APP_PORT or PORT must be a valid port number, got: {0}")]
     InvalidPort(String),
 
-    // This error is used when APP_HOST + APP_PORT/PORT cannot become a SocketAddr.
     #[error("APP_HOST and APP_PORT/PORT must form a valid socket address, got: {0}")]
     InvalidSocketAddress(String),
 
-    // This error is used when a numeric environment variable is invalid.
     #[error("{key} must be a valid number, got: {value}")]
     InvalidNumber { key: &'static str, value: String },
 
-    // This error is used when STORAGE_PROVIDER is unknown.
     #[error("unsupported storage provider: {0}")]
     UnsupportedStorageProvider(String),
 
-    // This error is used when EMAIL_PROVIDER is unknown.
     #[error("unsupported email provider: {0}")]
     UnsupportedEmailProvider(String),
 }
 
-// `impl AppConfig` means:
-// "Define functions that belong to AppConfig."
 impl AppConfig {
-    // Load the app configuration from environment variables.
-    //
-    // Return type:
-    // Result<Self, ConfigError>
-    //
-    // `Self` means AppConfig.
-    // So this returns either:
-    // - Ok(AppConfig)
-    // - Err(ConfigError)
     pub fn from_env() -> Result<Self, ConfigError> {
-        // Load variables from `.env` into the running process.
-        //
-        // `.ok()` intentionally ignores failure because production environments
-        // often provide variables directly without a `.env` file.
         dotenvy::dotenv().ok();
 
-        // Build and return the full AppConfig.
         Ok(Self {
-            // Build the nested server config.
             server: ServerConfig {
-                // Read APP_HOST if it exists.
-                //
-                // If APP_HOST is missing or empty, bind all interfaces.
-                //
-                // Render and most cloud platforms require 0.0.0.0, not 127.0.0.1.
-                // Local development can still override this with APP_HOST=127.0.0.1.
                 host: optional_env("APP_HOST").unwrap_or_else(|| "0.0.0.0".to_owned()),
-
-                // Read APP_PORT if it exists.
-                //
-                // Render provides PORT, so use it when APP_PORT is missing.
-                //
-                // If both APP_PORT and PORT are missing or empty, use "4000".
-                // Then parse the string into a u16 number.
                 port: {
                     let raw_port = optional_env("APP_PORT")
                         .or_else(|| optional_env("PORT"))
@@ -299,42 +141,21 @@ impl AppConfig {
                         .map_err(|_| ConfigError::InvalidPort(raw_port))?
                 },
             },
-
-            // Build the nested database config.
             database: DatabaseConfig {
-                // DATABASE_URL is required because the app cannot run
-                // without a PostgreSQL connection string.
                 url: required_env("DATABASE_URL")?,
             },
-
-            // Build the nested auth config.
             auth: AuthConfig {
-                // JWT_SECRET is required because auth will need it later.
                 jwt_secret: required_env("JWT_SECRET")?,
-                jwt_expires_in_seconds: optional_env("JWT_EXPIRES_IN_SECONDS")
-                    .unwrap_or_else(|| "86400".to_owned())
-                    .parse()
-                    .map_err(|_| ConfigError::InvalidNumber {
-                        key: "JWT_EXPIRES_IN_SECONDS",
-                        value: optional_env("JWT_EXPIRES_IN_SECONDS")
-                            .unwrap_or_else(|| "86400".to_owned()),
-                    })?,
-                refresh_token_expires_in_seconds: optional_env("REFRESH_TOKEN_EXPIRES_IN_SECONDS")
-                    .unwrap_or_else(|| "2592000".to_owned())
-                    .parse()
-                    .map_err(|_| ConfigError::InvalidNumber {
-                        key: "REFRESH_TOKEN_EXPIRES_IN_SECONDS",
-                        value: optional_env("REFRESH_TOKEN_EXPIRES_IN_SECONDS")
-                            .unwrap_or_else(|| "2592000".to_owned()),
-                    })?,
+                jwt_expires_in_seconds: parse_i64_env("JWT_EXPIRES_IN_SECONDS", "86400")?,
+                refresh_token_expires_in_seconds: parse_i64_env(
+                    "REFRESH_TOKEN_EXPIRES_IN_SECONDS",
+                    "2592000",
+                )?,
             },
-
             admin: AdminConfig {
                 email: required_env("SUPER_ADMIN_EMAIL")?.to_lowercase(),
                 password: required_env("SUPER_ADMIN_PASSWORD")?,
             },
-
-            // Build the nested Sui config.
             sui: SuiConfig {
                 network: optional_env("SUI_NETWORK").unwrap_or_else(|| "testnet".to_owned()),
                 rpc_url: optional_env("SUI_RPC_URL")
@@ -342,17 +163,11 @@ impl AppConfig {
                 package_id: optional_env("SUI_PACKAGE_ID"),
                 admin_address: optional_env("SUI_ADMIN_ADDRESS"),
                 keystore_path: optional_env("SUI_KEYSTORE_PATH"),
-                gas_budget: optional_env("SUI_GAS_BUDGET")
-                    .unwrap_or_else(|| "10000000".to_owned())
-                    .parse()
-                    .map_err(|_| ConfigError::InvalidNumber {
-                        key: "SUI_GAS_BUDGET",
-                        value: optional_env("SUI_GAS_BUDGET")
-                            .unwrap_or_else(|| "10000000".to_owned()),
-                    })?,
+                gas_budget: parse_u64_env("SUI_GAS_BUDGET", "10000000")?,
+                clock_object_id: optional_env("SUI_CLOCK_OBJECT_ID")
+                    .unwrap_or_else(|| "0x6".to_owned()),
+                request_timeout_seconds: parse_u64_env("SUI_REQUEST_TIMEOUT_SECONDS", "30")?,
             },
-
-            // Build the nested payment config.
             payments: PaymentConfig {
                 base_url: optional_env("APP_BASE_URL")
                     .unwrap_or_else(|| "http://127.0.0.1:4000".to_owned()),
@@ -365,7 +180,6 @@ impl AppConfig {
                     .unwrap_or_else(|| "NG".to_owned()),
                 flutterwave_secret_key: optional_env("FLUTTERWAVE_SECRET_KEY"),
             },
-
             storage: {
                 let provider = optional_env("STORAGE_PROVIDER")
                     .unwrap_or_else(|| "local".to_owned())
@@ -379,14 +193,7 @@ impl AppConfig {
                     provider,
                     local_root: optional_env("LOCAL_STORAGE_ROOT")
                         .unwrap_or_else(|| "storage".to_owned()),
-                    max_upload_bytes: optional_env("MAX_UPLOAD_BYTES")
-                        .unwrap_or_else(|| "10485760".to_owned())
-                        .parse()
-                        .map_err(|_| ConfigError::InvalidNumber {
-                            key: "MAX_UPLOAD_BYTES",
-                            value: optional_env("MAX_UPLOAD_BYTES")
-                                .unwrap_or_else(|| "10485760".to_owned()),
-                        })?,
+                    max_upload_bytes: parse_usize_env("MAX_UPLOAD_BYTES", "10485760")?,
                     backblaze: BackblazeConfig {
                         bucket: optional_env("BACKBLAZE_BUCKET"),
                         endpoint: optional_env("BACKBLAZE_ENDPOINT"),
@@ -397,7 +204,6 @@ impl AppConfig {
                     },
                 }
             },
-
             email: {
                 let provider = optional_env("EMAIL_PROVIDER")
                     .unwrap_or_else(|| "disabled".to_owned())
@@ -422,46 +228,42 @@ impl AppConfig {
         })
     }
 
-    // Convert APP_HOST and APP_PORT into a SocketAddr.
-    //
-    // Axum/Tokio needs a SocketAddr to bind the server.
     pub fn server_addr(&self) -> Result<SocketAddr, ConfigError> {
-        // Combine host and port into one string.
-        //
-        // Example result:
-        // "127.0.0.1:4000"
         let address = format!("{}:{}", self.server.host, self.server.port);
-
-        // Try to parse the string into SocketAddr.
-        //
-        // If parsing fails, return a ConfigError with the bad address.
         address
             .parse()
             .map_err(|_| ConfigError::InvalidSocketAddress(address))
     }
 }
 
-// Read a required environment variable.
-//
-// If the value is missing or empty, return a ConfigError.
 fn required_env(key: &'static str) -> Result<String, ConfigError> {
     optional_env(key).ok_or(ConfigError::MissingVariable(key))
 }
 
-// Read an optional environment variable.
-//
-// This returns:
-// - Some(value) when the variable exists and is not empty
-// - None when it is missing or empty
 fn optional_env(key: &str) -> Option<String> {
     env::var(key)
-        // Convert Result<String, VarError> into Option<String>.
-        //
-        // Ok(value) becomes Some(value).
-        // Err(_) becomes None.
         .ok()
-        // Remove whitespace from both ends of the value.
         .map(|value| value.trim().to_owned())
-        // Treat empty strings as missing config.
         .filter(|value| !value.is_empty())
+}
+
+fn parse_i64_env(key: &'static str, default: &'static str) -> Result<i64, ConfigError> {
+    let value = optional_env(key).unwrap_or_else(|| default.to_owned());
+    value
+        .parse()
+        .map_err(|_| ConfigError::InvalidNumber { key, value })
+}
+
+fn parse_u64_env(key: &'static str, default: &'static str) -> Result<u64, ConfigError> {
+    let value = optional_env(key).unwrap_or_else(|| default.to_owned());
+    value
+        .parse()
+        .map_err(|_| ConfigError::InvalidNumber { key, value })
+}
+
+fn parse_usize_env(key: &'static str, default: &'static str) -> Result<usize, ConfigError> {
+    let value = optional_env(key).unwrap_or_else(|| default.to_owned());
+    value
+        .parse()
+        .map_err(|_| ConfigError::InvalidNumber { key, value })
 }

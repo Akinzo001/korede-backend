@@ -35,6 +35,7 @@ impl DonationStatus {
 #[serde(rename_all = "snake_case")]
 pub enum DonationProofStatus {
     Pending,
+    PendingRetry,
     Published,
     Failed,
 }
@@ -43,6 +44,7 @@ impl DonationProofStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::PendingRetry => "pending_retry",
             Self::Published => "published",
             Self::Failed => "failed",
         }
@@ -50,9 +52,33 @@ impl DonationProofStatus {
 
     pub fn from_str(value: &str) -> Self {
         match value {
+            "pending_retry" => Self::PendingRetry,
             "published" => Self::Published,
             "failed" => Self::Failed,
             _ => Self::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DonationMethod {
+    Checkout,
+    DvaTransfer,
+}
+
+impl DonationMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Checkout => "checkout",
+            Self::DvaTransfer => "dva_transfer",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "dva_transfer" => Self::DvaTransfer,
+            _ => Self::Checkout,
         }
     }
 }
@@ -64,6 +90,7 @@ pub struct Donation {
     pub donor_display_name: String,
     pub donor_email: String,
     pub amount_kobo: i64,
+    pub method: DonationMethod,
     pub paystack_reference: String,
     pub paystack_transaction_reference: Option<String>,
     pub paystack_access_code: Option<String>,
@@ -79,6 +106,28 @@ pub struct Donation {
     pub proof_status: DonationProofStatus,
     pub sui_network: Option<String>,
     pub sui_tx_digest: Option<String>,
+    pub proof_attempt_count: i32,
+    pub proof_last_attempt_at: Option<DateTime<Utc>>,
+    pub proof_next_retry_at: Option<DateTime<Utc>>,
+    pub proof_last_error: Option<String>,
+    pub proof_published_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaseDva {
+    pub medical_case_id: Uuid,
+    pub paystack_reference: String,
+    pub paystack_customer_code: Option<String>,
+    pub paystack_dedicated_account_id: i64,
+    pub account_number: String,
+    pub account_name: String,
+    pub bank_name: String,
+    pub bank_slug: Option<String>,
+    pub is_active: bool,
+    pub deactivated_at: Option<DateTime<Utc>>,
+    pub deactivation_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

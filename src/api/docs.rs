@@ -32,25 +32,22 @@ use crate::api::{
         RegisterPatientResponse, ResendPatientEmailOtpRequest, ResendPatientEmailOtpResponse,
         UpsertPatientDeclarationRequest, VerifyPatientEmailRequest, VerifyPatientEmailResponse,
     },
+    payments::PaystackWebhookResponse,
 };
 
-// Generate an OpenAPI document for the backend.
-//
-// `derive(OpenApi)` tells utoipa to create the documentation object for us.
 #[derive(OpenApi)]
 #[openapi(
-    // General metadata shown in Swagger UI.
     info(
         title = "Korede Backend API",
         version = "0.1.0",
         description = "API documentation for the Korede backend. Korede helps donors fund verified hospital bills while keeping transactions transparent and auditable."
     ),
-    // List every handler function that should appear in the docs.
     paths(
         crate::api::health::health_check,
         crate::api::health::database_health_check,
         crate::api::cases::get_case_by_public_slug,
         crate::api::cases::initialize_case_donation,
+        crate::api::payments::handle_paystack_webhook,
         crate::api::auth::login,
         crate::api::auth::verify_login_otp,
         crate::api::auth::refresh_token,
@@ -74,7 +71,6 @@ use crate::api::{
         crate::api::patients::upsert_declaration,
         crate::api::patients::get_declaration
     ),
-    // List every response/request type that should appear as a schema.
     components(
         schemas(
             HealthResponse,
@@ -82,6 +78,7 @@ use crate::api::{
             PublicMedicalCaseResponse,
             InitializeDonationRequest,
             InitializeDonationResponse,
+            PaystackWebhookResponse,
             LoginRequest,
             LoginResponse,
             PatientLoginMedicalCaseResponse,
@@ -132,19 +129,16 @@ use crate::api::{
         )
     ),
     modifiers(&SecurityAddon),
-    // Group endpoints into named sections in Swagger UI.
     tags(
         (name = "Health", description = "Endpoints for checking whether the API and database are working."),
         (name = "Cases", description = "Public medical case pages for donor-facing case links."),
+        (name = "Payments", description = "Public payment and payment provider webhook endpoints."),
         (name = "Auth", description = "Centralized login endpoints for platform admins and hospitals."),
         (name = "Admin", description = "Super-admin authentication and platform administration endpoints."),
         (name = "Hospitals", description = "Hospital registration, authentication, and KYC endpoints."),
         (name = "Patients", description = "Patient registration endpoints.")
     )
 )]
-// Empty struct used only as a type that owns the generated OpenAPI document.
-//
-// You call `ApiDoc::openapi()` in `api/mod.rs`.
 pub struct ApiDoc;
 
 pub struct SecurityAddon;
