@@ -6,8 +6,10 @@ use utoipa::OpenApi;
 // These response structs are included as schemas in the generated API docs.
 use crate::api::{
     admin::{
-        AdminHospitalDocumentResponse, AdminHospitalDocumentsResponse, AdminHospitalResponse,
-        AdminHospitalsResponse, AdminPatientDeclarationResponse,
+        AdminDonationDetailResponse, AdminDonationProofRetryResponse, AdminDonationSummaryResponse,
+        AdminDonationsResponse, AdminHospitalDocumentResponse, AdminHospitalDocumentsResponse,
+        AdminHospitalResponse, AdminHospitalsResponse, AdminPaginationResponse,
+        AdminPatientDeclarationResponse,
     },
     auth::{
         ForgotPasswordRequest, ForgotPasswordResponse, LoginRequest, LoginResponse,
@@ -57,6 +59,9 @@ use crate::api::{
         crate::api::admin::get_hospital,
         crate::api::admin::list_hospital_documents,
         crate::api::admin::get_patient_declaration,
+        crate::api::admin::list_admin_donations,
+        crate::api::admin::get_admin_donation,
+        crate::api::admin::retry_donation_proof,
         crate::api::hospitals::register_hospital,
         crate::api::hospitals::verify_hospital_email,
         crate::api::hospitals::resend_hospital_email_otp,
@@ -93,6 +98,11 @@ use crate::api::{
             AdminHospitalDocumentResponse,
             AdminHospitalDocumentsResponse,
             AdminPatientDeclarationResponse,
+            AdminDonationsResponse,
+            AdminPaginationResponse,
+            AdminDonationSummaryResponse,
+            AdminDonationDetailResponse,
+            AdminDonationProofRetryResponse,
             Base64DocumentRequest,
             RegisterHospitalRequest,
             RegisterHospitalResponse,

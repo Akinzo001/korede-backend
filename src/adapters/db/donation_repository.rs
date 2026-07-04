@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{Executor, PgPool, Row};
+use sqlx::{Executor, PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
@@ -10,8 +10,9 @@ use crate::{
         public_case::PublicCaseDetails,
     },
     port::donation::{
-        DonationCaseLock, DonationFailureUpdate, DonationPaymentUpdate, DonationProofAttemptUpdate,
-        DonationProofJob, DonationRepository, DonationRepositoryError, NewDonation, UpsertCaseDva,
+        AdminDonationFilters, AdminDonationListQuery, AdminDonationOperation, DonationCaseLock,
+        DonationFailureUpdate, DonationPaymentUpdate, DonationProofAttemptUpdate, DonationProofJob,
+        DonationRepository, DonationRepositoryError, NewDonation, UpsertCaseDva,
     },
 };
 
@@ -499,6 +500,58 @@ impl DonationRepository for PostgresDonationRepository {
 
         Ok(())
     }
+
+    async fn list_admin_donations(
+        &self,
+        query: AdminDonationListQuery,
+    ) -> Result<Vec<AdminDonationOperation>, DonationRepositoryError> {
+        let mut builder = QueryBuilder::<Postgres>::new(admin_donation_select_query());
+        push_admin_donation_filters(&mut builder, &query.filters);
+        builder.push(" ORDER BY d.created_at DESC, d.id DESC LIMIT ");
+        builder.push_bind(query.limit);
+        builder.push(" OFFSET ");
+        builder.push_bind(query.offset);
+
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        rows.iter()
+            .map(admin_donation_operation_from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DonationRepositoryError::Database)
+    }
+
+    async fn count_admin_donations(
+        &self,
+        filters: AdminDonationFilters,
+    ) -> Result<i64, DonationRepositoryError> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+            SELECT COUNT(*) AS total
+            FROM case_donations d
+            JOIN medical_cases mc ON mc.id = d.medical_case_id
+            JOIN hospitals h ON h.id = mc.hospital_id
+            JOIN patients p ON p.id = mc.patient_id
+            "#,
+        );
+        push_admin_donation_filters(&mut builder, &filters);
+
+        let row = builder.build().fetch_one(&self.pool).await?;
+        row.try_get("total")
+            .map_err(DonationRepositoryError::Database)
+    }
+
+    async fn get_admin_donation(
+        &self,
+        donation_id: Uuid,
+    ) -> Result<Option<AdminDonationOperation>, DonationRepositoryError> {
+        let mut builder = QueryBuilder::<Postgres>::new(admin_donation_select_query());
+        builder.push(" WHERE d.id = ");
+        builder.push_bind(donation_id);
+
+        let row = builder.build().fetch_optional(&self.pool).await?;
+        row.map(|row| admin_donation_operation_from_row(&row))
+            .transpose()
+            .map_err(DonationRepositoryError::Database)
+    }
 }
 
 async fn insert_donation(
@@ -726,6 +779,100 @@ fn donation_select_query(suffix: &str) -> String {
     )
 }
 
+fn admin_donation_select_query() -> &'static str {
+    r#"
+    SELECT
+        d.id,
+        d.medical_case_id,
+        d.donor_display_name,
+        d.donor_email,
+        d.amount_kobo,
+        d.method,
+        d.paystack_reference,
+        d.paystack_transaction_reference,
+        d.paystack_access_code,
+        d.paystack_authorization_url,
+        d.paystack_customer_code,
+        d.paystack_dedicated_account_id,
+        d.paystack_dedicated_account_number,
+        d.paystack_dedicated_account_name,
+        d.paystack_dedicated_bank_name,
+        d.paystack_dedicated_bank_slug,
+        d.status,
+        d.paid_at,
+        d.proof_status,
+        d.sui_network,
+        d.sui_tx_digest,
+        d.proof_attempt_count,
+        d.proof_last_attempt_at,
+        d.proof_next_retry_at,
+        d.proof_last_error,
+        d.proof_published_at,
+        d.created_at,
+        d.updated_at,
+        mc.title AS case_title,
+        mc.public_slug AS public_slug,
+        mc.bill_amount_kobo AS bill_amount_kobo,
+        mc.amount_raised_kobo AS amount_raised_kobo,
+        mc.status AS case_status,
+        h.id AS hospital_id,
+        h.name AS hospital_name,
+        p.id AS patient_id,
+        p.full_name AS patient_name
+    FROM case_donations d
+    JOIN medical_cases mc ON mc.id = d.medical_case_id
+    JOIN hospitals h ON h.id = mc.hospital_id
+    JOIN patients p ON p.id = mc.patient_id
+    "#
+}
+
+fn push_admin_donation_filters(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    filters: &AdminDonationFilters,
+) {
+    builder.push(" WHERE TRUE");
+
+    if let Some(status) = &filters.status {
+        builder.push(" AND d.status = ");
+        builder.push_bind(status.as_str());
+    }
+
+    if let Some(method) = &filters.method {
+        builder.push(" AND d.method = ");
+        builder.push_bind(method.as_str());
+    }
+
+    if let Some(proof_status) = &filters.proof_status {
+        builder.push(" AND d.proof_status = ");
+        builder.push_bind(proof_status.as_str());
+    }
+
+    if let Some(hospital_id) = filters.hospital_id {
+        builder.push(" AND mc.hospital_id = ");
+        builder.push_bind(hospital_id);
+    }
+
+    if let Some(medical_case_id) = filters.medical_case_id {
+        builder.push(" AND d.medical_case_id = ");
+        builder.push_bind(medical_case_id);
+    }
+
+    if let Some(paystack_reference) = filters.paystack_reference.as_deref() {
+        builder.push(" AND d.paystack_reference = ");
+        builder.push_bind(paystack_reference.to_owned());
+    }
+
+    if let Some(from) = filters.from {
+        builder.push(" AND d.created_at >= ");
+        builder.push_bind(from);
+    }
+
+    if let Some(to) = filters.to {
+        builder.push(" AND d.created_at <= ");
+        builder.push_bind(to);
+    }
+}
+
 fn case_dva_select_query(suffix: &str) -> String {
     format!(
         r#"
@@ -862,6 +1009,23 @@ fn donation_from_row(row: &sqlx::postgres::PgRow) -> Result<Donation, sqlx::Erro
         proof_published_at: row.try_get("proof_published_at")?,
         created_at: row.try_get::<DateTime<Utc>, _>("created_at")?,
         updated_at: row.try_get::<DateTime<Utc>, _>("updated_at")?,
+    })
+}
+
+fn admin_donation_operation_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<AdminDonationOperation, sqlx::Error> {
+    Ok(AdminDonationOperation {
+        donation: donation_from_row(row)?,
+        case_title: row.try_get("case_title")?,
+        public_slug: row.try_get("public_slug")?,
+        bill_amount_kobo: row.try_get("bill_amount_kobo")?,
+        amount_raised_kobo: row.try_get("amount_raised_kobo")?,
+        case_status: row.try_get("case_status")?,
+        hospital_id: row.try_get("hospital_id")?,
+        hospital_name: row.try_get("hospital_name")?,
+        patient_id: row.try_get("patient_id")?,
+        patient_name: row.try_get("patient_name")?,
     })
 }
 

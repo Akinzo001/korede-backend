@@ -87,6 +87,39 @@ pub struct DonationProofJob {
     pub medical_case: MedicalCase,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AdminDonationFilters {
+    pub status: Option<DonationStatus>,
+    pub method: Option<DonationMethod>,
+    pub proof_status: Option<DonationProofStatus>,
+    pub hospital_id: Option<Uuid>,
+    pub medical_case_id: Option<Uuid>,
+    pub paystack_reference: Option<String>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminDonationListQuery {
+    pub filters: AdminDonationFilters,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminDonationOperation {
+    pub donation: Donation,
+    pub case_title: String,
+    pub public_slug: Option<String>,
+    pub bill_amount_kobo: i64,
+    pub amount_raised_kobo: i64,
+    pub case_status: String,
+    pub hospital_id: Uuid,
+    pub hospital_name: String,
+    pub patient_id: Uuid,
+    pub patient_name: String,
+}
+
 #[derive(Debug, Error)]
 pub enum DonationRepositoryError {
     #[error("donation not found")]
@@ -179,4 +212,19 @@ pub trait DonationRepository: Send + Sync {
         &self,
         update: DonationFailureUpdate,
     ) -> Result<(), DonationRepositoryError>;
+
+    async fn list_admin_donations(
+        &self,
+        query: AdminDonationListQuery,
+    ) -> Result<Vec<AdminDonationOperation>, DonationRepositoryError>;
+
+    async fn count_admin_donations(
+        &self,
+        filters: AdminDonationFilters,
+    ) -> Result<i64, DonationRepositoryError>;
+
+    async fn get_admin_donation(
+        &self,
+        donation_id: Uuid,
+    ) -> Result<Option<AdminDonationOperation>, DonationRepositoryError>;
 }
