@@ -19,6 +19,8 @@ const OTP_LENGTH: usize = 6;
 const OTP_EXPIRES_IN_SECONDS: i64 = 300;
 const OTP_MAX_ATTEMPTS: i32 = 5;
 const OTP_RESEND_COOLDOWN_SECONDS: i64 = 60;
+const DECLARATION_MIN_CHARACTERS: usize = 20;
+const DECLARATION_MAX_CHARACTERS: usize = 5000;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -429,17 +431,20 @@ fn validate_patient_registration(request: &RegisterPatientRequest) -> Result<(),
 
 fn validate_declaration_statement(statement: &str) -> Result<String, ApiError> {
     let statement = statement.trim();
+    let character_count = statement.chars().count();
 
-    if statement.len() < 20 {
-        return Err(ApiError::BadRequest(
-            "statement must be at least 20 characters".to_owned(),
-        ));
+    if character_count < DECLARATION_MIN_CHARACTERS {
+        return Err(ApiError::BadRequest(format!(
+            "patient declaration statement is too short: minimum is {} characters, received {} characters",
+            DECLARATION_MIN_CHARACTERS, character_count
+        )));
     }
 
-    if statement.len() > 5000 {
-        return Err(ApiError::BadRequest(
-            "statement must not exceed 5000 characters".to_owned(),
-        ));
+    if character_count > DECLARATION_MAX_CHARACTERS {
+        return Err(ApiError::BadRequest(format!(
+            "patient declaration statement is too long: maximum is {} characters, received {} characters",
+            DECLARATION_MAX_CHARACTERS, character_count
+        )));
     }
 
     Ok(statement.to_owned())
@@ -663,9 +668,15 @@ mod tests {
 
     #[test]
     fn declaration_validation_rejects_short_statement() {
-        assert!(matches!(
-            validate_declaration_statement("too short"),
-            Err(ApiError::BadRequest(_))
-        ));
+        let error = validate_declaration_statement("I need money").unwrap_err();
+
+        assert!(matches!(&error, ApiError::BadRequest(_)));
+        assert_eq!(
+            match error {
+                ApiError::BadRequest(message) => message,
+                _ => unreachable!(),
+            },
+            "patient declaration statement is too short: minimum is 20 characters, received 12 characters"
+        );
     }
 }
