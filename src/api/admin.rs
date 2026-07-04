@@ -551,7 +551,7 @@ pub async fn get_patient_declaration(
 ) -> Result<Json<AdminPatientDeclarationResponse>, ApiError> {
     let declaration = state
         .patient_declaration_repository
-        .find_patient_declaration_by_username(&username)
+        .find_current_patient_declaration_by_username(&username)
         .await?
         .ok_or_else(|| ApiError::NotFound("patient declaration not found".to_owned()))?;
 

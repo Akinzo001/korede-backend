@@ -142,7 +142,7 @@ pub async fn get_case_by_public_slug(
 
     let declaration = state
         .patient_declaration_repository
-        .find_patient_declaration(public_case.medical_case.patient_id)
+        .find_case_declaration(public_case.medical_case.id)
         .await?
         .ok_or_else(|| ApiError::NotFound("patient declaration not found".to_owned()))?;
 

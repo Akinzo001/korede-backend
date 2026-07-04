@@ -1058,7 +1058,7 @@ pub async fn find_patient(
 
     let declaration = state
         .patient_declaration_repository
-        .find_patient_declaration(patient.id)
+        .find_current_patient_declaration(patient.id)
         .await?;
 
     let has_open_case = state
@@ -1127,7 +1127,7 @@ pub async fn create_case(
 
     let declaration = state
         .patient_declaration_repository
-        .find_patient_declaration(patient.id)
+        .find_current_patient_declaration(patient.id)
         .await?
         .ok_or_else(|| {
             ApiError::BadRequest("patient declaration is required before case creation".to_owned())
@@ -1191,6 +1191,8 @@ pub async fn create_case(
                 id: case_id,
                 hospital_id: authenticated.hospital_id,
                 patient_id: patient.id,
+                patient_declaration_id: declaration.id,
+                patient_declaration_statement: declaration.statement.clone(),
                 title: request.title.trim().to_owned(),
                 public_slug,
                 diagnosis_summary: request.diagnosis_summary.trim().to_owned(),
@@ -1251,7 +1253,7 @@ pub async fn get_patient_declaration(
 ) -> Result<Json<HospitalPatientDeclarationResponse>, ApiError> {
     let declaration = state
         .patient_declaration_repository
-        .find_patient_declaration_by_username(&username)
+        .find_current_patient_declaration_by_username(&username)
         .await?
         .ok_or_else(|| ApiError::NotFound("patient declaration not found".to_owned()))?;
 

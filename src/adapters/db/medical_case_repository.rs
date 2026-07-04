@@ -36,6 +36,7 @@ impl MedicalCaseRepository for PostgresMedicalCaseRepository {
     ) -> Result<CreatedMedicalCase, MedicalCaseRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let case_id = medical_case.id;
+        let case_declaration_id = Uuid::new_v4();
 
         let case_row = sqlx::query(
             r#"
@@ -84,6 +85,42 @@ impl MedicalCaseRepository for PostgresMedicalCaseRepository {
         .fetch_one(&mut *transaction)
         .await
         .map_err(map_create_case_error)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO patient_case_declarations (
+                id,
+                medical_case_id,
+                patient_id,
+                statement,
+                created_at,
+                updated_at
+            )
+            VALUES ($1, $2, $3, $4, NOW(), NOW())
+            "#,
+        )
+        .bind(case_declaration_id)
+        .bind(case_id)
+        .bind(medical_case.patient_id)
+        .bind(&medical_case.patient_declaration_statement)
+        .execute(&mut *transaction)
+        .await?;
+
+        let deleted_current_declaration = sqlx::query(
+            r#"
+            DELETE FROM patient_declarations
+            WHERE id = $1
+              AND patient_id = $2
+            "#,
+        )
+        .bind(medical_case.patient_declaration_id)
+        .bind(medical_case.patient_id)
+        .execute(&mut *transaction)
+        .await?;
+
+        if deleted_current_declaration.rows_affected() == 0 {
+            return Err(MedicalCaseRepositoryError::PatientDeclarationNotFound);
+        }
 
         let mut created_billing_items = Vec::with_capacity(billing_items.len());
         for item in billing_items {

@@ -75,7 +75,8 @@ use crate::api::{
         crate::api::patients::register_patient,
         crate::api::patients::verify_patient_email,
         crate::api::patients::resend_patient_email_otp,
-        crate::api::patients::upsert_declaration,
+        crate::api::patients::create_declaration,
+        crate::api::patients::update_declaration,
         crate::api::patients::get_declaration
     ),
     components(

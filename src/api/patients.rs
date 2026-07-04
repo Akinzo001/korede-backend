@@ -11,7 +11,7 @@ use crate::{
         auth::AuthenticatedPatient,
         email::EmailMessage,
         patient::{NewPatient, NewPatientEmailOtp, PatientRepositoryError},
-        patient_declaration::UpsertPatientDeclaration,
+        patient_declaration::{NewPatientDeclaration, UpdatePatientDeclaration},
     },
 };
 
@@ -29,8 +29,8 @@ pub fn routes() -> Router<AppState> {
         .route("/resend-otp", post(resend_patient_email_otp))
         .route(
             "/declaration",
-            post(upsert_declaration)
-                .put(upsert_declaration)
+            post(create_declaration)
+                .patch(update_declaration)
                 .get(get_declaration),
         )
 }
@@ -349,32 +349,74 @@ pub async fn resend_patient_email_otp(
     security(("bearer_auth" = [])),
     request_body = UpsertPatientDeclarationRequest,
     responses(
-        (status = 200, description = "Patient declaration saved.", body = PatientDeclarationResponse),
+        (status = 200, description = "Patient declaration created.", body = PatientDeclarationResponse),
         (status = 400, description = "Invalid declaration statement."),
         (status = 401, description = "Missing or invalid patient bearer token."),
-        (status = 409, description = "Patient declaration is locked by an open medical case.")
+        (status = 409, description = "Patient declaration already exists or patient has an open medical case.")
     )
 )]
-pub async fn upsert_declaration(
+pub async fn create_declaration(
     authenticated: AuthenticatedPatient,
     State(state): State<AppState>,
     Json(request): Json<UpsertPatientDeclarationRequest>,
 ) -> Result<Json<PatientDeclarationResponse>, ApiError> {
     let statement = validate_declaration_statement(&request.statement)?;
 
-    if state
+    let has_open_case = state
         .medical_case_repository
         .patient_has_open_case(authenticated.patient_id)
+        .await?;
+
+    let has_current_declaration = state
+        .patient_declaration_repository
+        .find_current_patient_declaration(authenticated.patient_id)
         .await?
-    {
-        return Err(ApiError::Conflict(
-            "patient declaration is locked because an open medical case already exists".to_owned(),
-        ));
-    }
+        .is_some();
+
+    ensure_can_create_declaration(has_open_case, has_current_declaration)?;
 
     let declaration = state
         .patient_declaration_repository
-        .upsert_patient_declaration(UpsertPatientDeclaration {
+        .create_patient_declaration(NewPatientDeclaration {
+            patient_id: authenticated.patient_id,
+            statement,
+        })
+        .await?;
+
+    Ok(Json(PatientDeclarationResponse::from(declaration)))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/patients/declaration",
+    tag = "Patients",
+    security(("bearer_auth" = [])),
+    request_body = UpsertPatientDeclarationRequest,
+    responses(
+        (status = 200, description = "Patient declaration updated.", body = PatientDeclarationResponse),
+        (status = 400, description = "Invalid declaration statement."),
+        (status = 401, description = "Missing or invalid patient bearer token."),
+        (status = 404, description = "Patient declaration was not found."),
+        (status = 409, description = "Patient declaration cannot be updated while a medical case is open.")
+    )
+)]
+pub async fn update_declaration(
+    authenticated: AuthenticatedPatient,
+    State(state): State<AppState>,
+    Json(request): Json<UpsertPatientDeclarationRequest>,
+) -> Result<Json<PatientDeclarationResponse>, ApiError> {
+    let statement = validate_declaration_statement(&request.statement)?;
+
+    let has_open_case = state
+        .medical_case_repository
+        .patient_has_open_case(authenticated.patient_id)
+        .await?;
+
+    ensure_can_update_declaration(has_open_case)?;
+
+    let declaration = state
+        .patient_declaration_repository
+        .update_patient_declaration(UpdatePatientDeclaration {
             patient_id: authenticated.patient_id,
             statement,
         })
@@ -400,9 +442,9 @@ pub async fn get_declaration(
 ) -> Result<Json<PatientDeclarationResponse>, ApiError> {
     let declaration = state
         .patient_declaration_repository
-        .find_patient_declaration(authenticated.patient_id)
+        .find_current_patient_declaration(authenticated.patient_id)
         .await?
-        .ok_or_else(|| ApiError::NotFound("patient declaration not found".to_owned()))?;
+        .ok_or_else(|| ApiError::NotFound("patient has no editable declaration".to_owned()))?;
 
     Ok(Json(PatientDeclarationResponse::from(declaration)))
 }
@@ -448,6 +490,35 @@ fn validate_declaration_statement(statement: &str) -> Result<String, ApiError> {
     }
 
     Ok(statement.to_owned())
+}
+
+fn ensure_can_create_declaration(
+    has_open_case: bool,
+    has_current_declaration: bool,
+) -> Result<(), ApiError> {
+    if has_open_case {
+        return Err(ApiError::Conflict(
+            "patient declaration cannot be created while a medical case is open".to_owned(),
+        ));
+    }
+
+    if has_current_declaration {
+        return Err(ApiError::Conflict(
+            "patient declaration already exists".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn ensure_can_update_declaration(has_open_case: bool) -> Result<(), ApiError> {
+    if has_open_case {
+        return Err(ApiError::Conflict(
+            "patient declaration cannot be updated while a medical case is open".to_owned(),
+        ));
+    }
+
+    Ok(())
 }
 
 async fn send_patient_email_verification_otp(
@@ -677,6 +748,50 @@ mod tests {
                 _ => unreachable!(),
             },
             "patient declaration statement is too short: minimum is 20 characters, received 12 characters"
+        );
+    }
+
+    #[test]
+    fn create_declaration_guard_allows_new_declaration_without_open_case() {
+        assert!(ensure_can_create_declaration(false, false).is_ok());
+    }
+
+    #[test]
+    fn create_declaration_guard_rejects_duplicate_current_declaration() {
+        assert!(matches!(
+            ensure_can_create_declaration(false, true),
+            Err(ApiError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn create_declaration_guard_rejects_open_case() {
+        let error = ensure_can_create_declaration(true, false).unwrap_err();
+
+        assert_eq!(
+            match error {
+                ApiError::Conflict(message) => message,
+                _ => unreachable!(),
+            },
+            "patient declaration cannot be created while a medical case is open"
+        );
+    }
+
+    #[test]
+    fn update_declaration_guard_allows_without_open_case() {
+        assert!(ensure_can_update_declaration(false).is_ok());
+    }
+
+    #[test]
+    fn update_declaration_guard_rejects_open_case() {
+        let error = ensure_can_update_declaration(true).unwrap_err();
+
+        assert_eq!(
+            match error {
+                ApiError::Conflict(message) => message,
+                _ => unreachable!(),
+            },
+            "patient declaration cannot be updated while a medical case is open"
         );
     }
 }

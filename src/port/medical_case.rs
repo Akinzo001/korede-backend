@@ -13,6 +13,8 @@ pub struct NewMedicalCase {
     pub id: Uuid,
     pub hospital_id: Uuid,
     pub patient_id: Uuid,
+    pub patient_declaration_id: Uuid,
+    pub patient_declaration_statement: String,
     pub title: String,
     pub public_slug: String,
     pub diagnosis_summary: String,
@@ -47,6 +49,9 @@ pub struct CreatedMedicalCase {
 pub enum MedicalCaseRepositoryError {
     #[error("medical case not found")]
     NotFound,
+
+    #[error("patient declaration not found")]
+    PatientDeclarationNotFound,
 
     #[error("patient already has an open medical case")]
     PatientHasOpenCase,

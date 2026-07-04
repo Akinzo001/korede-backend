@@ -5,7 +5,8 @@ use uuid::Uuid;
 use crate::{
     domain::patient_declaration::PatientDeclaration,
     port::patient_declaration::{
-        PatientDeclarationRepository, PatientDeclarationRepositoryError, UpsertPatientDeclaration,
+        NewPatientDeclaration, PatientDeclarationRepository, PatientDeclarationRepositoryError,
+        UpdatePatientDeclaration,
     },
 };
 
@@ -22,9 +23,9 @@ impl PostgresPatientDeclarationRepository {
 
 #[async_trait]
 impl PatientDeclarationRepository for PostgresPatientDeclarationRepository {
-    async fn upsert_patient_declaration(
+    async fn create_patient_declaration(
         &self,
-        declaration: UpsertPatientDeclaration,
+        declaration: NewPatientDeclaration,
     ) -> Result<PatientDeclaration, PatientDeclarationRepositoryError> {
         let id = Uuid::new_v4();
         let row = sqlx::query(
@@ -37,10 +38,6 @@ impl PatientDeclarationRepository for PostgresPatientDeclarationRepository {
                 updated_at
             )
             VALUES ($1, $2, $3, NOW(), NOW())
-            ON CONFLICT (patient_id)
-            DO UPDATE SET
-                statement = EXCLUDED.statement,
-                updated_at = NOW()
             RETURNING
                 id,
                 patient_id,
@@ -53,12 +50,43 @@ impl PatientDeclarationRepository for PostgresPatientDeclarationRepository {
         .bind(declaration.patient_id)
         .bind(declaration.statement)
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(map_declaration_write_error)?;
 
         declaration_from_row(&row).map_err(PatientDeclarationRepositoryError::Database)
     }
 
-    async fn find_patient_declaration(
+    async fn update_patient_declaration(
+        &self,
+        declaration: UpdatePatientDeclaration,
+    ) -> Result<PatientDeclaration, PatientDeclarationRepositoryError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE patient_declarations
+            SET
+                statement = $2,
+                updated_at = NOW()
+            WHERE patient_id = $1
+            RETURNING
+                id,
+                patient_id,
+                statement,
+                created_at,
+                updated_at
+            "#,
+        )
+        .bind(declaration.patient_id)
+        .bind(declaration.statement)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| declaration_from_row(&row))
+            .transpose()
+            .map_err(PatientDeclarationRepositoryError::Database)?
+            .ok_or(PatientDeclarationRepositoryError::NotFound)
+    }
+
+    async fn find_current_patient_declaration(
         &self,
         patient_id: Uuid,
     ) -> Result<Option<PatientDeclaration>, PatientDeclarationRepositoryError> {
@@ -83,7 +111,7 @@ impl PatientDeclarationRepository for PostgresPatientDeclarationRepository {
             .map_err(PatientDeclarationRepositoryError::Database)
     }
 
-    async fn find_patient_declaration_by_username(
+    async fn find_current_patient_declaration_by_username(
         &self,
         username: &str,
     ) -> Result<Option<PatientDeclaration>, PatientDeclarationRepositoryError> {
@@ -109,6 +137,46 @@ impl PatientDeclarationRepository for PostgresPatientDeclarationRepository {
             .transpose()
             .map_err(PatientDeclarationRepositoryError::Database)
     }
+
+    async fn find_case_declaration(
+        &self,
+        medical_case_id: Uuid,
+    ) -> Result<Option<PatientDeclaration>, PatientDeclarationRepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                patient_id,
+                statement,
+                created_at,
+                updated_at
+            FROM patient_case_declarations
+            WHERE medical_case_id = $1
+            "#,
+        )
+        .bind(medical_case_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| declaration_from_row(&row))
+            .transpose()
+            .map_err(PatientDeclarationRepositoryError::Database)
+    }
+}
+
+fn map_declaration_write_error(error: sqlx::Error) -> PatientDeclarationRepositoryError {
+    if is_duplicate_current_declaration(&error) {
+        PatientDeclarationRepositoryError::DuplicateDeclaration
+    } else {
+        PatientDeclarationRepositoryError::Database(error)
+    }
+}
+
+fn is_duplicate_current_declaration(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database_error| database_error.constraint())
+        .is_some_and(|constraint| constraint == "patient_declarations_patient_id_key")
 }
 
 fn declaration_from_row(row: &sqlx::postgres::PgRow) -> Result<PatientDeclaration, sqlx::Error> {
