@@ -163,6 +163,17 @@ pub trait DonationRepository: Send + Sync {
         medical_case_id: Uuid,
     ) -> Result<Option<PublicCaseDetails>, DonationRepositoryError>;
 
+    async fn get_patient_current_donation_progress(
+        &self,
+        patient_id: Uuid,
+    ) -> Result<Option<PublicCaseDetails>, DonationRepositoryError>;
+
+    async fn get_patient_case_donation_progress(
+        &self,
+        patient_id: Uuid,
+        medical_case_id: Uuid,
+    ) -> Result<Option<PublicCaseDetails>, DonationRepositoryError>;
+
     async fn find_case_dva(
         &self,
         medical_case_id: Uuid,

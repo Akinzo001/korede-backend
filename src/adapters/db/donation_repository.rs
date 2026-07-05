@@ -148,6 +148,37 @@ impl DonationRepository for PostgresDonationRepository {
         }))
     }
 
+    async fn get_patient_current_donation_progress(
+        &self,
+        patient_id: Uuid,
+    ) -> Result<Option<PublicCaseDetails>, DonationRepositoryError> {
+        let case_row = sqlx::query(&medical_case_select_query(
+            "WHERE patient_id = $1 AND status = ANY($2) ORDER BY created_at DESC, id DESC LIMIT 1",
+        ))
+        .bind(patient_id)
+        .bind(MedicalCaseStatus::open_status_values())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        load_case_details_from_optional_row(&self.pool, case_row).await
+    }
+
+    async fn get_patient_case_donation_progress(
+        &self,
+        patient_id: Uuid,
+        medical_case_id: Uuid,
+    ) -> Result<Option<PublicCaseDetails>, DonationRepositoryError> {
+        let case_row = sqlx::query(&medical_case_select_query(
+            "WHERE patient_id = $1 AND id = $2 LIMIT 1",
+        ))
+        .bind(patient_id)
+        .bind(medical_case_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        load_case_details_from_optional_row(&self.pool, case_row).await
+    }
+
     async fn find_case_dva(
         &self,
         medical_case_id: Uuid,
@@ -678,6 +709,35 @@ async fn load_public_case_details(
         .fetch_optional(pool)
         .await?;
 
+    let Some(case_row) = case_row else {
+        return Ok(None);
+    };
+
+    let medical_case =
+        medical_case_from_row(&case_row).map_err(DonationRepositoryError::Database)?;
+    let donation_rows = sqlx::query(&donation_select_query(
+        "WHERE medical_case_id = $1 AND status = 'paid' ORDER BY paid_at DESC, created_at DESC",
+    ))
+    .bind(medical_case.id)
+    .fetch_all(pool)
+    .await?;
+
+    let donations = donation_rows
+        .iter()
+        .map(donation_from_row)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DonationRepositoryError::Database)?;
+
+    Ok(Some(PublicCaseDetails {
+        medical_case,
+        donations,
+    }))
+}
+
+async fn load_case_details_from_optional_row(
+    pool: &PgPool,
+    case_row: Option<sqlx::postgres::PgRow>,
+) -> Result<Option<PublicCaseDetails>, DonationRepositoryError> {
     let Some(case_row) = case_row else {
         return Ok(None);
     };

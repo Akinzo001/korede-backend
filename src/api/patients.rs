@@ -1,4 +1,8 @@
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{
+    extract::{Path, State},
+    routing::{get, post},
+    Json, Router,
+};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -6,7 +10,10 @@ use uuid::Uuid;
 
 use crate::{
     api::{error::ApiError, AppState},
-    domain::{patient::Patient, patient_declaration::PatientDeclaration},
+    domain::{
+        donation::Donation, patient::Patient, patient_declaration::PatientDeclaration,
+        public_case::PublicCaseDetails,
+    },
     port::{
         auth::AuthenticatedPatient,
         email::EmailMessage,
@@ -32,6 +39,14 @@ pub fn routes() -> Router<AppState> {
             post(create_declaration)
                 .patch(update_declaration)
                 .get(get_declaration),
+        )
+        .route(
+            "/cases/current/donation-progress",
+            get(get_current_case_donation_progress),
+        )
+        .route(
+            "/cases/:case_id/donation-progress",
+            get(get_case_donation_progress),
         )
 }
 
@@ -111,6 +126,37 @@ pub struct PatientDeclarationResponse {
     pub statement: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PatientDonationProgressResponse {
+    pub case: PatientDonationProgressCaseResponse,
+    pub percentage_paid: f64,
+    pub percentage_left: f64,
+    pub donor_count: usize,
+    pub donors: Vec<PatientDonationProgressDonorResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PatientDonationProgressCaseResponse {
+    pub medical_case_id: Uuid,
+    pub title: String,
+    pub public_slug: Option<String>,
+    pub public_link: Option<String>,
+    pub status: String,
+    pub bill_amount_kobo: i64,
+    pub amount_raised_kobo: i64,
+    pub remaining_amount_kobo: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PatientDonationProgressDonorResponse {
+    pub id: Uuid,
+    pub display_name: String,
+    pub amount_kobo: i64,
+    pub method: String,
+    pub paid_at: Option<DateTime<Utc>>,
+    pub sui_transaction_url: Option<String>,
 }
 
 #[utoipa::path(
@@ -449,6 +495,64 @@ pub async fn get_declaration(
     Ok(Json(PatientDeclarationResponse::from(declaration)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/patients/cases/current/donation-progress",
+    tag = "Patients",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Current open medical case donation progress.", body = PatientDonationProgressResponse),
+        (status = 401, description = "Missing or invalid patient bearer token."),
+        (status = 404, description = "Patient has no open medical case.")
+    )
+)]
+pub async fn get_current_case_donation_progress(
+    authenticated: AuthenticatedPatient,
+    State(state): State<AppState>,
+) -> Result<Json<PatientDonationProgressResponse>, ApiError> {
+    let progress = state
+        .donation_repository
+        .get_patient_current_donation_progress(authenticated.patient_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("patient has no open medical case".to_owned()))?;
+
+    Ok(Json(PatientDonationProgressResponse::from_parts(
+        progress,
+        &state.sui_network,
+    )))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/patients/cases/{case_id}/donation-progress",
+    tag = "Patients",
+    security(("bearer_auth" = [])),
+    params(
+        ("case_id" = Uuid, Path, description = "Medical case ID")
+    ),
+    responses(
+        (status = 200, description = "Medical case donation progress.", body = PatientDonationProgressResponse),
+        (status = 401, description = "Missing or invalid patient bearer token."),
+        (status = 404, description = "Medical case was not found for this patient.")
+    )
+)]
+pub async fn get_case_donation_progress(
+    authenticated: AuthenticatedPatient,
+    State(state): State<AppState>,
+    Path(case_id): Path<Uuid>,
+) -> Result<Json<PatientDonationProgressResponse>, ApiError> {
+    let progress = state
+        .donation_repository
+        .get_patient_case_donation_progress(authenticated.patient_id, case_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("medical case not found".to_owned()))?;
+
+    Ok(Json(PatientDonationProgressResponse::from_parts(
+        progress,
+        &state.sui_network,
+    )))
+}
+
 fn validate_patient_registration(request: &RegisterPatientRequest) -> Result<(), ApiError> {
     normalize_username(&request.username)?;
 
@@ -519,6 +623,92 @@ fn ensure_can_update_declaration(has_open_case: bool) -> Result<(), ApiError> {
     }
 
     Ok(())
+}
+
+impl PatientDonationProgressResponse {
+    fn from_parts(progress: PublicCaseDetails, sui_network: &str) -> Self {
+        let medical_case = progress.medical_case;
+        let remaining_amount_kobo = remaining_amount_kobo(
+            medical_case.bill_amount_kobo,
+            medical_case.amount_raised_kobo,
+        );
+        let (percentage_paid, percentage_left) = funding_percentages(
+            medical_case.bill_amount_kobo,
+            medical_case.amount_raised_kobo,
+        );
+        let donors = progress
+            .donations
+            .into_iter()
+            .map(|donation| PatientDonationProgressDonorResponse::from_parts(donation, sui_network))
+            .collect::<Vec<_>>();
+
+        Self {
+            case: PatientDonationProgressCaseResponse {
+                medical_case_id: medical_case.id,
+                title: medical_case.title,
+                public_link: medical_case
+                    .public_slug
+                    .as_deref()
+                    .map(patient_case_public_link),
+                public_slug: medical_case.public_slug,
+                status: medical_case.status.as_str().to_owned(),
+                bill_amount_kobo: medical_case.bill_amount_kobo,
+                amount_raised_kobo: medical_case.amount_raised_kobo,
+                remaining_amount_kobo,
+            },
+            percentage_paid,
+            percentage_left,
+            donor_count: donors.len(),
+            donors,
+        }
+    }
+}
+
+impl PatientDonationProgressDonorResponse {
+    fn from_parts(donation: Donation, sui_network: &str) -> Self {
+        let sui_transaction_url = donation
+            .sui_tx_digest
+            .as_deref()
+            .map(|digest| suiscan_transaction_url(sui_network, digest));
+
+        Self {
+            id: donation.id,
+            display_name: donation.donor_display_name,
+            amount_kobo: donation.amount_kobo,
+            method: donation.method.as_str().to_owned(),
+            paid_at: donation.paid_at,
+            sui_transaction_url,
+        }
+    }
+}
+
+fn remaining_amount_kobo(bill_amount_kobo: i64, amount_raised_kobo: i64) -> i64 {
+    (bill_amount_kobo - amount_raised_kobo).max(0)
+}
+
+fn funding_percentages(bill_amount_kobo: i64, amount_raised_kobo: i64) -> (f64, f64) {
+    if bill_amount_kobo <= 0 {
+        return (0.0, 100.0);
+    }
+
+    let percentage_paid =
+        ((amount_raised_kobo as f64 / bill_amount_kobo as f64) * 100.0).clamp(0.0, 100.0);
+    let percentage_paid = round_two_decimal_places(percentage_paid);
+    let percentage_left = round_two_decimal_places((100.0 - percentage_paid).max(0.0));
+
+    (percentage_paid, percentage_left)
+}
+
+fn round_two_decimal_places(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+fn patient_case_public_link(public_slug: &str) -> String {
+    format!("/cases/{public_slug}")
+}
+
+fn suiscan_transaction_url(network: &str, tx_digest: &str) -> String {
+    format!("https://suiscan.xyz/{network}/tx/{tx_digest}")
 }
 
 async fn send_patient_email_verification_otp(
@@ -792,6 +982,35 @@ mod tests {
                 _ => unreachable!(),
             },
             "patient declaration cannot be updated while a medical case is open"
+        );
+    }
+
+    #[test]
+    fn funding_percentages_calculates_partial_progress() {
+        assert_eq!(funding_percentages(100_000, 25_555), (25.56, 74.44));
+    }
+
+    #[test]
+    fn funding_percentages_caps_paid_at_one_hundred() {
+        assert_eq!(funding_percentages(100_000, 150_000), (100.0, 0.0));
+    }
+
+    #[test]
+    fn funding_percentages_handles_zero_bill_amount() {
+        assert_eq!(funding_percentages(0, 50_000), (0.0, 100.0));
+        assert_eq!(funding_percentages(-1, 50_000), (0.0, 100.0));
+    }
+
+    #[test]
+    fn remaining_amount_is_clamped_at_zero() {
+        assert_eq!(remaining_amount_kobo(100_000, 150_000), 0);
+    }
+
+    #[test]
+    fn suiscan_url_uses_network_and_digest() {
+        assert_eq!(
+            suiscan_transaction_url("testnet", "abc123"),
+            "https://suiscan.xyz/testnet/tx/abc123"
         );
     }
 }
