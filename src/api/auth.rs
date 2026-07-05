@@ -157,7 +157,7 @@ pub struct ResetPasswordResponse {
     tag = "Auth",
     request_body = LoginRequest,
     responses(
-        (status = 200, description = "Admin authenticated or hospital password accepted.", body = LoginResponse),
+        (status = 200, description = "User authenticated or hospital password accepted.", body = LoginResponse),
         (status = 400, description = "Invalid login request."),
         (status = 401, description = "Invalid email or password.")
     )
@@ -171,40 +171,6 @@ pub async fn login(
 
     let email = request.email.trim().to_lowercase();
     let password = request.password.trim();
-
-    if email == state.super_admin_email {
-        if !constant_time_eq(password.as_bytes(), state.super_admin_password.as_bytes()) {
-            return Err(invalid_credentials());
-        }
-
-        let access_token = state
-            .token_service
-            .create_admin_access_token(&state.super_admin_email)
-            .map_err(|_| ApiError::Internal("failed to create access token".to_owned()))?;
-        let refresh_token = issue_refresh_token(
-            &state,
-            "super_admin".to_owned(),
-            &state.super_admin_email,
-            "admin",
-        )
-        .await?;
-
-        return Ok(Json(LoginResponse {
-            role: "admin".to_owned(),
-            token_type: Some("Bearer".to_owned()),
-            access_token: Some(access_token),
-            refresh_token: Some(refresh_token),
-            expires_in: Some(state.jwt_expires_in_seconds),
-            refresh_expires_in: Some(state.refresh_token_expires_in_seconds),
-            otp_required: false,
-            login_challenge_id: None,
-            email: Some(state.super_admin_email.clone()),
-            otp_expires_in_seconds: None,
-            message: "Login successful.".to_owned(),
-            patient: None,
-            medical_cases: None,
-        }));
-    }
 
     if state
         .hospital_repository
@@ -240,7 +206,54 @@ pub async fn login(
         }));
     }
 
-    login_patient(&state, &email, &request.password).await
+    if state
+        .patient_repository
+        .find_patient_by_email(&email)
+        .await?
+        .is_some()
+    {
+        return login_patient(&state, &email, &request.password).await;
+    }
+
+    if email == state.super_admin_email {
+        return login_admin(&state, password).await;
+    }
+
+    Err(invalid_credentials())
+}
+
+async fn login_admin(state: &AppState, password: &str) -> Result<Json<LoginResponse>, ApiError> {
+    if !constant_time_eq(password.as_bytes(), state.super_admin_password.as_bytes()) {
+        return Err(invalid_credentials());
+    }
+
+    let access_token = state
+        .token_service
+        .create_admin_access_token(&state.super_admin_email)
+        .map_err(|_| ApiError::Internal("failed to create access token".to_owned()))?;
+    let refresh_token = issue_refresh_token(
+        state,
+        "super_admin".to_owned(),
+        &state.super_admin_email,
+        "admin",
+    )
+    .await?;
+
+    Ok(Json(LoginResponse {
+        role: "admin".to_owned(),
+        token_type: Some("Bearer".to_owned()),
+        access_token: Some(access_token),
+        refresh_token: Some(refresh_token),
+        expires_in: Some(state.jwt_expires_in_seconds),
+        refresh_expires_in: Some(state.refresh_token_expires_in_seconds),
+        otp_required: false,
+        login_challenge_id: None,
+        email: Some(state.super_admin_email.clone()),
+        otp_expires_in_seconds: None,
+        message: "Login successful.".to_owned(),
+        patient: None,
+        medical_cases: None,
+    }))
 }
 
 #[utoipa::path(
@@ -988,6 +1001,19 @@ mod tests {
             validate_login_request(&request),
             Err(ApiError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn login_request_ignores_role_field() {
+        let request: LoginRequest = serde_json::from_value(serde_json::json!({
+            "role": "hospital",
+            "email": "admin@example.com",
+            "password": "password"
+        }))
+        .unwrap();
+
+        assert_eq!(request.email, "admin@example.com");
+        assert_eq!(request.password, "password");
     }
 
     #[test]
