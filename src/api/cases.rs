@@ -34,6 +34,8 @@ pub fn routes() -> Router<AppState> {
 pub struct PublicMedicalCaseResponse {
     pub id: Uuid,
     pub hospital_id: Uuid,
+    pub hospital_name: String,
+    pub hospital_address: Option<String>,
     pub patient_id: Uuid,
     pub patient_declaration: PublicPatientDeclarationResponse,
     pub donors: Vec<PublicDonationResponse>,
@@ -146,6 +148,12 @@ pub async fn get_case_by_public_slug(
         .await?
         .ok_or_else(|| ApiError::NotFound("patient declaration not found".to_owned()))?;
 
+    let hospital = state
+        .hospital_repository
+        .find_hospital_by_id(public_case.medical_case.hospital_id)
+        .await?
+        .ok_or(crate::port::hospital::HospitalRepositoryError::NotFound)?;
+
     let case_dva = state
         .donation_repository
         .find_case_dva(public_case.medical_case.id)
@@ -154,6 +162,8 @@ pub async fn get_case_by_public_slug(
     Ok(Json(PublicMedicalCaseResponse::from_parts(
         public_case,
         declaration,
+        hospital.name,
+        hospital.official_address,
         case_dva,
         &state.sui_network,
     )))
@@ -349,6 +359,8 @@ impl PublicMedicalCaseResponse {
     fn from_parts(
         public_case: PublicCaseDetails,
         declaration: PatientDeclaration,
+        hospital_name: String,
+        hospital_address: Option<String>,
         case_dva: Option<CaseDva>,
         sui_network: &str,
     ) -> Self {
@@ -361,6 +373,8 @@ impl PublicMedicalCaseResponse {
         Self {
             id: medical_case.id,
             hospital_id: medical_case.hospital_id,
+            hospital_name,
+            hospital_address,
             patient_id: medical_case.patient_id,
             patient_declaration: PublicPatientDeclarationResponse::from(declaration),
             donors: public_case
@@ -506,12 +520,19 @@ mod tests {
                 donations: vec![],
             },
             declaration,
+            "Lagoon Hospital".to_owned(),
+            Some("1 Hospital Road, Lagos".to_owned()),
             None,
             "testnet",
         );
 
         assert_eq!(response.public_slug, "oluwaseun34-case-12345678");
         assert_eq!(response.public_link, "/cases/oluwaseun34-case-12345678");
+        assert_eq!(response.hospital_name, "Lagoon Hospital");
+        assert_eq!(
+            response.hospital_address.as_deref(),
+            Some("1 Hospital Road, Lagos")
+        );
         assert_eq!(response.amount_raised_kobo, 45_000_000);
         assert_eq!(response.remaining_amount_kobo, 105_000_000);
         assert!(response.donation_options.checkout_enabled);
@@ -550,6 +571,8 @@ mod tests {
                 donations: vec![],
             },
             declaration,
+            "Lagoon Hospital".to_owned(),
+            Some("1 Hospital Road, Lagos".to_owned()),
             None,
             "testnet",
         );
@@ -606,6 +629,8 @@ mod tests {
                 donations: vec![],
             },
             declaration,
+            "Lagoon Hospital".to_owned(),
+            Some("1 Hospital Road, Lagos".to_owned()),
             Some(CaseDva {
                 medical_case_id: Uuid::new_v4(),
                 paystack_reference: "ref-1".to_owned(),
