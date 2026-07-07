@@ -31,11 +31,11 @@ use crate::api::{
         VerifyLoginOtpRequest, VerifyLoginOtpResponse,
     },
     patients::{
-        PatientDeclarationResponse, PatientDonationProgressCaseResponse,
-        PatientDonationProgressDonorResponse, PatientDonationProgressResponse, PatientResponse,
-        RegisterPatientRequest, RegisterPatientResponse, ResendPatientEmailOtpRequest,
-        ResendPatientEmailOtpResponse, UpsertPatientDeclarationRequest, VerifyPatientEmailRequest,
-        VerifyPatientEmailResponse,
+        PatientCaseShareLinkResponse, PatientDeclarationResponse,
+        PatientDonationProgressCaseResponse, PatientDonationProgressDonorResponse,
+        PatientDonationProgressResponse, PatientResponse, RegisterPatientRequest,
+        RegisterPatientResponse, ResendPatientEmailOtpRequest, ResendPatientEmailOtpResponse,
+        UpsertPatientDeclarationRequest, VerifyPatientEmailRequest, VerifyPatientEmailResponse,
     },
     payments::PaystackWebhookResponse,
 };
@@ -81,7 +81,9 @@ use crate::api::{
         crate::api::patients::update_declaration,
         crate::api::patients::get_declaration,
         crate::api::patients::get_current_case_donation_progress,
-        crate::api::patients::get_case_donation_progress
+        crate::api::patients::get_case_donation_progress,
+        crate::api::patients::get_current_case_share_link,
+        crate::api::patients::get_case_share_link
     ),
     components(
         schemas(
@@ -147,6 +149,7 @@ use crate::api::{
             PatientDonationProgressResponse,
             PatientDonationProgressCaseResponse,
             PatientDonationProgressDonorResponse,
+            PatientCaseShareLinkResponse,
             PatientResponse
         )
     ),

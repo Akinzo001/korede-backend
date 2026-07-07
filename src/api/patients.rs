@@ -45,9 +45,14 @@ pub fn routes() -> Router<AppState> {
             get(get_current_case_donation_progress),
         )
         .route(
+            "/cases/current/share-link",
+            get(get_current_case_share_link),
+        )
+        .route(
             "/cases/:case_id/donation-progress",
             get(get_case_donation_progress),
         )
+        .route("/cases/:case_id/share-link", get(get_case_share_link))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -157,6 +162,16 @@ pub struct PatientDonationProgressDonorResponse {
     pub method: String,
     pub paid_at: Option<DateTime<Utc>>,
     pub sui_transaction_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PatientCaseShareLinkResponse {
+    pub medical_case_id: Uuid,
+    pub title: String,
+    pub public_slug: String,
+    pub public_link: String,
+    pub share_url: String,
+    pub message: String,
 }
 
 #[utoipa::path(
@@ -553,6 +568,66 @@ pub async fn get_case_donation_progress(
     )))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/patients/cases/current/share-link",
+    tag = "Patients",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Current open medical case share link.", body = PatientCaseShareLinkResponse),
+        (status = 401, description = "Missing or invalid patient bearer token."),
+        (status = 404, description = "Patient has no open medical case."),
+        (status = 409, description = "Medical case does not have a public donation link.")
+    )
+)]
+pub async fn get_current_case_share_link(
+    authenticated: AuthenticatedPatient,
+    State(state): State<AppState>,
+) -> Result<Json<PatientCaseShareLinkResponse>, ApiError> {
+    let progress = state
+        .donation_repository
+        .get_patient_current_donation_progress(authenticated.patient_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("patient has no open medical case".to_owned()))?;
+
+    Ok(Json(PatientCaseShareLinkResponse::from_parts(
+        progress,
+        &state.app_base_url,
+    )?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/patients/cases/{case_id}/share-link",
+    tag = "Patients",
+    security(("bearer_auth" = [])),
+    params(
+        ("case_id" = Uuid, Path, description = "Medical case ID")
+    ),
+    responses(
+        (status = 200, description = "Medical case share link.", body = PatientCaseShareLinkResponse),
+        (status = 401, description = "Missing or invalid patient bearer token."),
+        (status = 404, description = "Medical case was not found for this patient."),
+        (status = 409, description = "Medical case does not have a public donation link.")
+    )
+)]
+pub async fn get_case_share_link(
+    authenticated: AuthenticatedPatient,
+    State(state): State<AppState>,
+    Path(case_id): Path<Uuid>,
+) -> Result<Json<PatientCaseShareLinkResponse>, ApiError> {
+    let progress = state
+        .donation_repository
+        .get_patient_case_donation_progress(authenticated.patient_id, case_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("medical case not found".to_owned()))?;
+
+    Ok(Json(PatientCaseShareLinkResponse::from_parts(
+        progress,
+        &state.app_base_url,
+    )?))
+}
+
 fn validate_patient_registration(request: &RegisterPatientRequest) -> Result<(), ApiError> {
     normalize_username(&request.username)?;
 
@@ -682,6 +757,26 @@ impl PatientDonationProgressDonorResponse {
     }
 }
 
+impl PatientCaseShareLinkResponse {
+    fn from_parts(progress: PublicCaseDetails, app_base_url: &str) -> Result<Self, ApiError> {
+        let medical_case = progress.medical_case;
+        let public_slug = medical_case.public_slug.ok_or_else(|| {
+            ApiError::Conflict("medical case does not have a public donation link".to_owned())
+        })?;
+        let public_link = patient_case_public_link(&public_slug);
+        let share_url = absolute_case_share_url(app_base_url, &public_link);
+
+        Ok(Self {
+            medical_case_id: medical_case.id,
+            title: medical_case.title,
+            public_slug,
+            public_link,
+            share_url,
+            message: "Share this link so donors can support your treatment.".to_owned(),
+        })
+    }
+}
+
 fn remaining_amount_kobo(bill_amount_kobo: i64, amount_raised_kobo: i64) -> i64 {
     (bill_amount_kobo - amount_raised_kobo).max(0)
 }
@@ -705,6 +800,14 @@ fn round_two_decimal_places(value: f64) -> f64 {
 
 fn patient_case_public_link(public_slug: &str) -> String {
     format!("/cases/{public_slug}")
+}
+
+fn absolute_case_share_url(app_base_url: &str, public_link: &str) -> String {
+    format!(
+        "{}/{}",
+        app_base_url.trim_end_matches('/'),
+        public_link.trim_start_matches('/')
+    )
 }
 
 fn suiscan_transaction_url(network: &str, tx_digest: &str) -> String {
@@ -1011,6 +1114,14 @@ mod tests {
         assert_eq!(
             suiscan_transaction_url("testnet", "abc123"),
             "https://suiscan.xyz/testnet/tx/abc123"
+        );
+    }
+
+    #[test]
+    fn absolute_case_share_url_joins_base_and_public_link() {
+        assert_eq!(
+            absolute_case_share_url("https://korede.example/", "/cases/case-123"),
+            "https://korede.example/cases/case-123"
         );
     }
 }

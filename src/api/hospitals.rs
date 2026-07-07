@@ -252,8 +252,6 @@ pub struct CreateHospitalCaseDocumentRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CreateHospitalCaseResponse {
     pub case: HospitalCaseResponse,
-    pub patient: HospitalPatientLookupPatientResponse,
-    pub patient_declaration: HospitalPatientDeclarationResponse,
     pub billing_items: Vec<HospitalCaseBillingItemResponse>,
     pub documents: Vec<HospitalCaseDocumentResponse>,
 }
@@ -1217,8 +1215,6 @@ pub async fn create_case(
 
     Ok(Json(CreateHospitalCaseResponse {
         case: HospitalCaseResponse::from(created.case),
-        patient: HospitalPatientLookupPatientResponse::from(patient),
-        patient_declaration: HospitalPatientDeclarationResponse::from(declaration),
         billing_items: created
             .billing_items
             .into_iter()
