@@ -170,7 +170,7 @@ impl AppConfig {
             },
             payments: PaymentConfig {
                 base_url: optional_env("APP_BASE_URL")
-                    .unwrap_or_else(|| "http://127.0.0.1:4000".to_owned()),
+                    .unwrap_or_else(|| "https://korede-health.akinzo.buzz".to_owned()),
                 app_name: optional_env("APP_NAME").unwrap_or_else(|| "Korede Health".to_owned()),
                 paystack_secret_key: optional_env("PAYSTACK_SECRET_KEY"),
                 paystack_webhook_secret: optional_env("PAYSTACK_WEBHOOK_SECRET"),
