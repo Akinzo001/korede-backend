@@ -1,4 +1,10 @@
-use axum::{body::Bytes, extract::State, http::HeaderMap, routing::post, Json, Router};
+use axum::{
+    body::Bytes,
+    extract::{Path, State},
+    http::HeaderMap,
+    routing::post,
+    Json, Router,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -15,12 +21,28 @@ use crate::{
 };
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/paystack/webhook", post(handle_paystack_webhook))
+    Router::new()
+        .route("/paystack/webhook", post(handle_paystack_webhook))
+        .route("/paystack/verify/:reference", post(verify_paystack_payment))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PaystackWebhookResponse {
     pub status: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PaystackVerificationResponse {
+    pub status: String,
+    pub donation_id: Option<String>,
+    pub payment_status: Option<String>,
+    pub message: String,
+}
+
+struct PaymentConfirmationOutcome {
+    status: String,
+    donation_id: Option<uuid::Uuid>,
+    payment_status: Option<DonationStatus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,7 +95,12 @@ pub async fn handle_paystack_webhook(
             .lock_pending_donation_for_confirmation(reference)
             .await?
         {
-            return finalize_checkout_donation(state, locked, reference).await;
+            let outcome =
+                finalize_checkout_donation(state, locked, reference, PendingPaymentBehavior::Fail)
+                    .await?;
+            return Ok(Json(PaystackWebhookResponse {
+                status: outcome.status,
+            }));
         }
     }
 
@@ -93,18 +120,94 @@ pub async fn handle_paystack_webhook(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/payments/paystack/verify/{reference}",
+    tag = "Payments",
+    params(
+        ("reference" = String, Path, description = "Paystack transaction reference returned when checkout was initialized.")
+    ),
+    responses(
+        (status = 200, description = "Paystack payment verification completed.", body = PaystackVerificationResponse),
+        (status = 400, description = "Reference is not a checkout donation or provider rejected verification."),
+        (status = 404, description = "Donation reference was not found."),
+        (status = 503, description = "Paystack is not configured.")
+    )
+)]
+pub async fn verify_paystack_payment(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+) -> Result<Json<PaystackVerificationResponse>, ApiError> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err(ApiError::BadRequest(
+            "paystack reference is required".to_owned(),
+        ));
+    }
+
+    let Some(locked) = state
+        .donation_repository
+        .lock_pending_donation_for_confirmation(reference)
+        .await?
+    else {
+        return Err(ApiError::NotFound("donation not found".to_owned()));
+    };
+
+    if locked.donation.method != DonationMethod::Checkout {
+        return Err(ApiError::BadRequest(
+            "manual verification is only supported for checkout donations".to_owned(),
+        ));
+    }
+
+    let outcome = finalize_checkout_donation(
+        state,
+        locked,
+        reference,
+        PendingPaymentBehavior::LeavePending,
+    )
+    .await?;
+
+    Ok(Json(PaystackVerificationResponse {
+        message: verification_message(&outcome.status).to_owned(),
+        donation_id: outcome.donation_id.map(|id| id.to_string()),
+        payment_status: outcome
+            .payment_status
+            .map(|status| status.as_str().to_owned()),
+        status: outcome.status,
+    }))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PendingPaymentBehavior {
+    Fail,
+    LeavePending,
+}
+
 async fn finalize_checkout_donation(
     state: AppState,
     locked: crate::port::donation::DonationCaseLock,
     reference: &str,
-) -> Result<Json<PaystackWebhookResponse>, ApiError> {
+    pending_behavior: PendingPaymentBehavior,
+) -> Result<PaymentConfirmationOutcome, ApiError> {
     if locked.donation.status == DonationStatus::Paid {
-        return Ok(Json(PaystackWebhookResponse {
+        return Ok(PaymentConfirmationOutcome {
             status: "already_processed".to_owned(),
-        }));
+            donation_id: Some(locked.donation.id),
+            payment_status: Some(locked.donation.status),
+        });
     }
 
     let verification = state.payment_gateway.verify_payment(reference).await?;
+
+    if verification.status == PaymentVerificationStatus::Pending {
+        if matches!(pending_behavior, PendingPaymentBehavior::LeavePending) {
+            return Ok(PaymentConfirmationOutcome {
+                status: "pending".to_owned(),
+                donation_id: Some(locked.donation.id),
+                payment_status: Some(locked.donation.status),
+            });
+        }
+    }
 
     if verification.status != PaymentVerificationStatus::Success {
         state
@@ -115,9 +218,11 @@ async fn finalize_checkout_donation(
             })
             .await?;
 
-        return Ok(Json(PaystackWebhookResponse {
+        return Ok(PaymentConfirmationOutcome {
             status: "failed".to_owned(),
-        }));
+            donation_id: Some(locked.donation.id),
+            payment_status: Some(DonationStatus::Failed),
+        });
     }
 
     if verification.amount_kobo != locked.donation.amount_kobo {
@@ -129,9 +234,11 @@ async fn finalize_checkout_donation(
             })
             .await?;
 
-        return Ok(Json(PaystackWebhookResponse {
+        return Ok(PaymentConfirmationOutcome {
             status: "amount_mismatch".to_owned(),
-        }));
+            donation_id: Some(locked.donation.id),
+            payment_status: Some(DonationStatus::Failed),
+        });
     }
 
     let now = Utc::now();
@@ -199,14 +306,18 @@ async fn finalize_checkout_donation(
                 locked.remaining_amount_kobo - donation.amount_kobo,
             )
             .await?;
-            Ok(Json(PaystackWebhookResponse {
+            Ok(PaymentConfirmationOutcome {
                 status: "processed".to_owned(),
-            }))
+                donation_id: Some(donation.id),
+                payment_status: Some(donation.status),
+            })
         }
         Err(crate::port::donation::DonationRepositoryError::AmountExceedsRemaining) => {
-            Ok(Json(PaystackWebhookResponse {
+            Ok(PaymentConfirmationOutcome {
                 status: "overflow_rejected".to_owned(),
-            }))
+                donation_id: Some(locked.donation.id),
+                payment_status: Some(DonationStatus::RejectedOverflow),
+            })
         }
         Err(error) => Err(error.into()),
     }
@@ -417,6 +528,20 @@ fn remaining_amount_after_dva_confirmation(
     donation_amount_kobo: i64,
 ) -> i64 {
     (bill_amount_kobo - (amount_raised_kobo + donation_amount_kobo)).max(0)
+}
+
+fn verification_message(status: &str) -> &'static str {
+    match status {
+        "processed" => "Payment verified and donation marked as paid.",
+        "already_processed" => "Donation was already marked as paid.",
+        "pending" => "Paystack has not confirmed this payment yet.",
+        "failed" => "Paystack reported that this payment failed.",
+        "amount_mismatch" => "Paystack amount does not match the donation amount.",
+        "overflow_rejected" => {
+            "Payment was verified but rejected because the case is already fully funded."
+        }
+        _ => "Payment verification completed.",
+    }
 }
 
 fn validate_paystack_webhook_signature(

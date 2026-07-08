@@ -37,7 +37,7 @@ use crate::api::{
         RegisterPatientResponse, ResendPatientEmailOtpRequest, ResendPatientEmailOtpResponse,
         UpsertPatientDeclarationRequest, VerifyPatientEmailRequest, VerifyPatientEmailResponse,
     },
-    payments::PaystackWebhookResponse,
+    payments::{PaystackVerificationResponse, PaystackWebhookResponse},
 };
 
 #[derive(OpenApi)]
@@ -53,6 +53,7 @@ use crate::api::{
         crate::api::cases::get_case_by_public_slug,
         crate::api::cases::initialize_case_donation,
         crate::api::payments::handle_paystack_webhook,
+        crate::api::payments::verify_paystack_payment,
         crate::api::auth::login,
         crate::api::auth::verify_login_otp,
         crate::api::auth::refresh_token,
@@ -93,6 +94,7 @@ use crate::api::{
             InitializeDonationRequest,
             InitializeDonationResponse,
             PaystackWebhookResponse,
+            PaystackVerificationResponse,
             LoginRequest,
             LoginResponse,
             PatientLoginMedicalCaseResponse,
