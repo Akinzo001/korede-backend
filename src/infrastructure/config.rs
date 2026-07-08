@@ -82,11 +82,13 @@ pub struct ResendConfig {
 
 #[derive(Debug, Clone)]
 pub struct SuiConfig {
+    pub cli_path: String,
     pub network: String,
     pub rpc_url: String,
     pub package_id: Option<String>,
     pub admin_address: Option<String>,
     pub keystore_path: Option<String>,
+    pub client_config_path: Option<String>,
     pub gas_budget: u64,
     pub clock_object_id: String,
     pub request_timeout_seconds: u64,
@@ -157,12 +159,14 @@ impl AppConfig {
                 password: required_env("SUPER_ADMIN_PASSWORD")?,
             },
             sui: SuiConfig {
+                cli_path: optional_env("SUI_CLI_PATH").unwrap_or_else(|| "sui".to_owned()),
                 network: optional_env("SUI_NETWORK").unwrap_or_else(|| "testnet".to_owned()),
                 rpc_url: optional_env("SUI_RPC_URL")
-                    .unwrap_or_else(|| "https://fullnode.testnet.sui.io:443".to_owned()),
+                    .unwrap_or_else(|| "https://sui-testnet.grpc.ankr.com:443".to_owned()),
                 package_id: optional_env("SUI_PACKAGE_ID"),
                 admin_address: optional_env("SUI_ADMIN_ADDRESS"),
                 keystore_path: optional_env("SUI_KEYSTORE_PATH"),
+                client_config_path: optional_env("SUI_CLIENT_CONFIG_PATH"),
                 gas_budget: parse_u64_env("SUI_GAS_BUDGET", "10000000")?,
                 clock_object_id: optional_env("SUI_CLOCK_OBJECT_ID")
                     .unwrap_or_else(|| "0x6".to_owned()),

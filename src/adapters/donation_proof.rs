@@ -62,10 +62,16 @@ impl SuiDonationProofPublisher {
             .keystore_path
             .as_ref()
             .ok_or(DonationProofError::MissingConfig("SUI_KEYSTORE_PATH"))?;
-        let client_config_path = PathBuf::from(keystore_path)
+        let keystore_directory = PathBuf::from(keystore_path)
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
-            .join("korede-sui-client.yaml");
+            .to_path_buf();
+        let default_client_config_path = keystore_directory.join("client.yaml");
+        let client_config_path = config
+            .client_config_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or(default_client_config_path);
 
         Ok(Self {
             config: config.clone(),
@@ -106,6 +112,7 @@ impl SuiDonationProofPublisher {
             Some(("SUI_KEYSTORE_PATH", keystore_literal.as_str())),
             self.config.request_timeout_seconds,
             true,
+            &self.config.cli_path,
         )
         .await?;
 
@@ -123,6 +130,7 @@ impl SuiDonationProofPublisher {
             Some(("SUI_KEYSTORE_PATH", keystore_literal.as_str())),
             self.config.request_timeout_seconds,
             false,
+            &self.config.cli_path,
         )
         .await?;
 
@@ -188,6 +196,7 @@ impl DonationProofPublisher for SuiDonationProofPublisher {
             Some(("SUI_KEYSTORE_PATH", keystore_literal.as_str())),
             self.config.request_timeout_seconds,
             false,
+            &self.config.cli_path,
         )
         .await?;
 
@@ -244,11 +253,20 @@ async fn run_sui_command(
     env_override: Option<(&str, &str)>,
     timeout_seconds: u64,
     tolerate_existing_env_error: bool,
+    cli_path: &str,
 ) -> Result<String, DonationProofError> {
-    let mut command = Command::new("sui");
-    command.args(args);
-    command.arg("--client.config").arg(client_config_path);
-    command.arg("--yes");
+    let mut command = Command::new(cli_path);
+
+    if let Some((command_group, command_args)) = args.split_first() {
+        command.arg(command_group);
+        if *command_group == "client" {
+            command
+                .arg("--client.config")
+                .arg(client_config_path)
+                .arg("--yes");
+        }
+        command.args(command_args);
+    }
 
     if let Some((key, value)) = env_override {
         command.env(key, value);
@@ -257,13 +275,15 @@ async fn run_sui_command(
     let output = tokio::time::timeout(Duration::from_secs(timeout_seconds), command.output())
         .await
         .map_err(|_| DonationProofError::Provider("timed out waiting for Sui CLI".to_owned()))?
-        .map_err(|_| DonationProofError::PublishFailed)?;
+        .map_err(|error| {
+            DonationProofError::Provider(format!("failed to run Sui CLI at '{cli_path}': {error}"))
+        })?;
 
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let stderr = sanitize_sui_error(&String::from_utf8_lossy(&output.stderr));
     if tolerate_existing_env_error
         && (stderr.contains("Alias already exists")
             || stderr.contains("environment config with this alias already exists"))
@@ -272,10 +292,26 @@ async fn run_sui_command(
     }
 
     Err(DonationProofError::Provider(if stderr.is_empty() {
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        sanitize_sui_error(&String::from_utf8_lossy(&output.stdout))
     } else {
         stderr
     }))
+}
+
+fn sanitize_sui_error(output: &str) -> String {
+    output
+        .lines()
+        .map(|line| {
+            if line.to_ascii_lowercase().contains("secret recovery phrase") {
+                "  secret recovery phrase: [REDACTED]"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
 }
 
 fn normalize_windows_path(path: &str) -> String {
@@ -304,11 +340,13 @@ mod tests {
     #[test]
     fn sui_publisher_reports_configured_only_when_required_values_exist() {
         let mut config = crate::infrastructure::config::SuiConfig {
+            cli_path: "sui".to_owned(),
             network: "testnet".to_owned(),
-            rpc_url: "https://fullnode.testnet.sui.io:443".to_owned(),
+            rpc_url: "https://sui-testnet.grpc.ankr.com:443".to_owned(),
             package_id: None,
             admin_address: None,
             keystore_path: None,
+            client_config_path: None,
             gas_budget: 10_000_000,
             clock_object_id: "0x6".to_owned(),
             request_timeout_seconds: 30,
@@ -327,6 +365,17 @@ mod tests {
             super::normalize_windows_path(r"C:\keys\sui.keystore"),
             "C:/keys/sui.keystore"
         );
+    }
+
+    #[test]
+    fn sui_errors_redact_recovery_phrases() {
+        let output = super::sanitize_sui_error(
+            "Generated key\nsecret recovery phrase : [alpha beta gamma]\nDNS error",
+        );
+
+        assert!(!output.contains("alpha beta gamma"));
+        assert!(output.contains("[REDACTED]"));
+        assert!(output.contains("DNS error"));
     }
 
     #[test]
