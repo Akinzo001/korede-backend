@@ -28,7 +28,10 @@ use crate::{
             HospitalRepositoryError, NewHospital, NewHospitalAuditLog, NewHospitalDocument,
             NewHospitalEmailOtp, NewHospitalLoginOtp,
         },
-        medical_case::{NewMedicalCase, NewMedicalCaseBillingItem, NewMedicalCaseDocument},
+        medical_case::{
+            HospitalActiveMedicalCase, NewMedicalCase, NewMedicalCaseBillingItem,
+            NewMedicalCaseDocument,
+        },
     },
 };
 
@@ -49,6 +52,7 @@ pub fn routes() -> Router<AppState> {
             "/patients/:username/declaration",
             get(get_patient_declaration),
         )
+        .route("/cases/active", get(list_active_cases))
         .route("/cases", post(create_case))
 }
 
@@ -267,6 +271,29 @@ pub struct HospitalCaseResponse {
     pub diagnosis_summary: String,
     pub bill_amount_kobo: i64,
     pub amount_raised_kobo: i64,
+    pub status: String,
+    pub admitted_at: Option<NaiveDate>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalActiveCasesResponse {
+    pub cases: Vec<HospitalActiveCaseResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalActiveCaseResponse {
+    pub id: Uuid,
+    pub patient_id: Uuid,
+    pub patient_name: String,
+    pub title: String,
+    pub public_slug: String,
+    pub public_link: String,
+    pub diagnosis_summary: String,
+    pub bill_amount_kobo: i64,
+    pub amount_raised_kobo: i64,
+    pub remaining_amount_kobo: i64,
     pub status: String,
     pub admitted_at: Option<NaiveDate>,
     pub created_at: DateTime<Utc>,
@@ -1072,6 +1099,31 @@ pub async fn find_patient(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/hospitals/cases/active",
+    tag = "Hospitals",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Active medical cases for the authenticated hospital.", body = HospitalActiveCasesResponse),
+        (status = 401, description = "Missing or invalid hospital bearer token.")
+    )
+)]
+pub async fn list_active_cases(
+    authenticated: AuthenticatedHospital,
+    State(state): State<AppState>,
+) -> Result<Json<HospitalActiveCasesResponse>, ApiError> {
+    let cases = state
+        .medical_case_repository
+        .list_hospital_active_cases(authenticated.hospital_id)
+        .await?
+        .into_iter()
+        .map(HospitalActiveCaseResponse::from)
+        .collect();
+
+    Ok(Json(HospitalActiveCasesResponse { cases }))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/hospitals/cases",
     tag = "Hospitals",
@@ -1467,6 +1519,10 @@ fn public_case_link(public_slug: &str) -> String {
     format!("/cases/{public_slug}")
 }
 
+fn remaining_case_amount_kobo(bill_amount_kobo: i64, amount_raised_kobo: i64) -> i64 {
+    (bill_amount_kobo - amount_raised_kobo).max(0)
+}
+
 fn format_ngn_amount(amount_kobo: i64) -> String {
     let naira = amount_kobo / 100;
     let kobo = amount_kobo.abs() % 100;
@@ -1722,6 +1778,33 @@ impl From<MedicalCase> for HospitalCaseResponse {
     }
 }
 
+impl From<HospitalActiveMedicalCase> for HospitalActiveCaseResponse {
+    fn from(active_case: HospitalActiveMedicalCase) -> Self {
+        let medical_case = active_case.case;
+        let public_slug = medical_case.public_slug.clone().unwrap_or_default();
+
+        Self {
+            id: medical_case.id,
+            patient_id: medical_case.patient_id,
+            patient_name: active_case.patient_name,
+            title: medical_case.title,
+            public_slug: public_slug.clone(),
+            public_link: public_case_link(&public_slug),
+            diagnosis_summary: medical_case.diagnosis_summary,
+            bill_amount_kobo: medical_case.bill_amount_kobo,
+            amount_raised_kobo: medical_case.amount_raised_kobo,
+            remaining_amount_kobo: remaining_case_amount_kobo(
+                medical_case.bill_amount_kobo,
+                medical_case.amount_raised_kobo,
+            ),
+            status: medical_case.status.as_str().to_owned(),
+            admitted_at: medical_case.admitted_at,
+            created_at: medical_case.created_at,
+            updated_at: medical_case.updated_at,
+        }
+    }
+}
+
 impl From<MedicalCaseBillingItem> for HospitalCaseBillingItemResponse {
     fn from(item: MedicalCaseBillingItem) -> Self {
         Self {
@@ -1752,6 +1835,7 @@ impl From<MedicalCaseDocument> for HospitalCaseDocumentResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::medical_case::MedicalCaseStatus;
 
     fn hospital_with_status(status: HospitalVerificationStatus) -> Hospital {
         Hospital {
@@ -1772,6 +1856,34 @@ mod tests {
             verification_status: status,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    fn hospital_active_case_with_amounts(
+        bill_amount_kobo: i64,
+        amount_raised_kobo: i64,
+    ) -> HospitalActiveMedicalCase {
+        let now = Utc::now();
+
+        HospitalActiveMedicalCase {
+            case: MedicalCase {
+                id: Uuid::new_v4(),
+                hospital_id: Uuid::new_v4(),
+                patient_id: Uuid::new_v4(),
+                title: "Surgery Support".to_owned(),
+                public_slug: Some("andrew-surgery-12345678".to_owned()),
+                diagnosis_summary: "Surgery support summary".to_owned(),
+                bill_amount_kobo,
+                amount_raised_kobo,
+                status: MedicalCaseStatus::Active,
+                admitted_at: None,
+                blockchain_network: None,
+                blockchain_tx_digest: None,
+                blockchain_record_id: None,
+                created_at: now,
+                updated_at: now,
+            },
+            patient_name: "Andrew Andrew".to_owned(),
         }
     }
 
@@ -1949,6 +2061,52 @@ mod tests {
             public_case_link("oluwaseun34-case-12345678"),
             "/cases/oluwaseun34-case-12345678"
         );
+    }
+
+    #[test]
+    fn hospital_active_case_response_includes_public_link() {
+        let response =
+            HospitalActiveCaseResponse::from(hospital_active_case_with_amounts(500_000, 100_000));
+
+        assert_eq!(response.public_slug, "andrew-surgery-12345678");
+        assert_eq!(response.public_link, "/cases/andrew-surgery-12345678");
+        assert_eq!(response.patient_name, "Andrew Andrew");
+    }
+
+    #[test]
+    fn hospital_active_case_response_clamps_remaining_amount_at_zero() {
+        let response =
+            HospitalActiveCaseResponse::from(hospital_active_case_with_amounts(500_000, 700_000));
+
+        assert_eq!(response.remaining_amount_kobo, 0);
+    }
+
+    #[test]
+    fn hospital_active_case_response_calculates_remaining_amount() {
+        let response =
+            HospitalActiveCaseResponse::from(hospital_active_case_with_amounts(500_000, 125_000));
+
+        assert_eq!(response.remaining_amount_kobo, 375_000);
+    }
+
+    #[test]
+    fn active_case_filter_includes_open_statuses() {
+        for status in [
+            MedicalCaseStatus::Draft,
+            MedicalCaseStatus::PendingReview,
+            MedicalCaseStatus::Active,
+            MedicalCaseStatus::Funded,
+            MedicalCaseStatus::TreatmentCommenced,
+        ] {
+            assert!(MedicalCaseStatus::open_status_values().contains(&status.as_str()));
+        }
+    }
+
+    #[test]
+    fn active_case_filter_excludes_closed_statuses() {
+        for status in [MedicalCaseStatus::Discharged, MedicalCaseStatus::Cancelled] {
+            assert!(!MedicalCaseStatus::open_status_values().contains(&status.as_str()));
+        }
     }
 
     #[test]

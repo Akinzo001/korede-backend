@@ -45,6 +45,12 @@ pub struct CreatedMedicalCase {
     pub documents: Vec<MedicalCaseDocument>,
 }
 
+#[derive(Debug, Clone)]
+pub struct HospitalActiveMedicalCase {
+    pub case: MedicalCase,
+    pub patient_name: String,
+}
+
 #[derive(Debug, Error)]
 pub enum MedicalCaseRepositoryError {
     #[error("medical case not found")]
@@ -73,6 +79,11 @@ pub trait MedicalCaseRepository: Send + Sync {
         &self,
         patient_id: Uuid,
     ) -> Result<Vec<MedicalCase>, MedicalCaseRepositoryError>;
+
+    async fn list_hospital_active_cases(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<Vec<HospitalActiveMedicalCase>, MedicalCaseRepositoryError>;
 
     async fn find_case_by_public_slug(
         &self,

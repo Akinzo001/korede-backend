@@ -10,8 +10,9 @@ use crate::{
         medical_case_document::MedicalCaseDocument,
     },
     port::medical_case::{
-        CreatedMedicalCase, MedicalCaseRepository, MedicalCaseRepositoryError, NewMedicalCase,
-        NewMedicalCaseBillingItem, NewMedicalCaseDocument,
+        CreatedMedicalCase, HospitalActiveMedicalCase, MedicalCaseRepository,
+        MedicalCaseRepositoryError, NewMedicalCase, NewMedicalCaseBillingItem,
+        NewMedicalCaseDocument,
     },
 };
 
@@ -245,6 +246,47 @@ impl MedicalCaseRepository for PostgresMedicalCaseRepository {
             .map_err(MedicalCaseRepositoryError::Database)
     }
 
+    async fn list_hospital_active_cases(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<Vec<HospitalActiveMedicalCase>, MedicalCaseRepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                mc.id,
+                mc.hospital_id,
+                mc.patient_id,
+                mc.title,
+                mc.public_slug,
+                mc.diagnosis_summary,
+                mc.bill_amount_kobo,
+                mc.amount_raised_kobo,
+                mc.status,
+                mc.blockchain_network,
+                mc.blockchain_tx_digest,
+                mc.blockchain_record_id,
+                mc.admitted_at,
+                mc.created_at,
+                mc.updated_at,
+                p.full_name AS patient_name
+            FROM medical_cases mc
+            INNER JOIN patients p ON p.id = mc.patient_id
+            WHERE mc.hospital_id = $1
+              AND mc.status = ANY($2)
+            ORDER BY mc.created_at DESC, mc.id DESC
+            "#,
+        )
+        .bind(hospital_id)
+        .bind(MedicalCaseStatus::open_status_values())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter()
+            .map(hospital_active_case_from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(MedicalCaseRepositoryError::Database)
+    }
+
     async fn find_case_by_public_slug(
         &self,
         public_slug: &str,
@@ -348,6 +390,15 @@ fn medical_case_from_row(row: &sqlx::postgres::PgRow) -> Result<MedicalCase, sql
         blockchain_record_id: row.try_get("blockchain_record_id")?,
         created_at: row.try_get::<DateTime<Utc>, _>("created_at")?,
         updated_at: row.try_get::<DateTime<Utc>, _>("updated_at")?,
+    })
+}
+
+fn hospital_active_case_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<HospitalActiveMedicalCase, sqlx::Error> {
+    Ok(HospitalActiveMedicalCase {
+        case: medical_case_from_row(row)?,
+        patient_name: row.try_get("patient_name")?,
     })
 }
 
