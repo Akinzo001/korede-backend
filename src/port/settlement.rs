@@ -50,6 +50,9 @@ pub struct AdminSettlementListQuery {
     pub status: Option<HospitalSettlementStatus>,
     pub hospital_id: Option<Uuid>,
     pub medical_case_id: Option<Uuid>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub admin_action_required_only: bool,
     pub limit: i64,
     pub offset: i64,
 }

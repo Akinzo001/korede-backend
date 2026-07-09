@@ -325,6 +325,8 @@ impl HospitalSettlementRepository for PostgresHospitalSettlementRepository {
             .bind(query.status.as_ref().map(|status| status.as_str()))
             .bind(query.hospital_id)
             .bind(query.medical_case_id)
+            .bind(query.from)
+            .bind(query.to)
             .fetch_one(&self.pool)
             .await
             .map_err(SettlementRepositoryError::Database)
@@ -336,7 +338,7 @@ impl HospitalSettlementRepository for PostgresHospitalSettlementRepository {
     ) -> Result<Vec<AdminSettlementOperation>, SettlementRepositoryError> {
         let mut sql = admin_settlement_operation_sql("WHERE TRUE");
         append_admin_filters(&mut sql, &query);
-        sql.push_str(" ORDER BY s.created_at DESC, s.id DESC LIMIT $4 OFFSET $5");
+        sql.push_str(" ORDER BY s.created_at DESC, s.id DESC LIMIT $6 OFFSET $7");
 
         let mut query_builder = sqlx::query(&sql);
         query_builder = bind_admin_filters(query_builder, &query);
@@ -435,10 +437,16 @@ fn admin_settlement_operation_sql(where_clause: &str) -> String {
 }
 
 fn append_admin_filters(sql: &mut String, query: &AdminSettlementListQuery) {
-    let _ = query;
     sql.push_str(" AND ($1::text IS NULL OR s.status = $1)");
     sql.push_str(" AND ($2::uuid IS NULL OR s.hospital_id = $2)");
     sql.push_str(" AND ($3::uuid IS NULL OR s.medical_case_id = $3)");
+    sql.push_str(" AND ($4::timestamptz IS NULL OR s.created_at >= $4)");
+    sql.push_str(" AND ($5::timestamptz IS NULL OR s.created_at <= $5)");
+    if query.admin_action_required_only {
+        sql.push_str(
+            " AND s.status IN ('failed', 'failed_config', 'bank_details_required', 'reversed', 'otp_required')",
+        );
+    }
 }
 
 fn bind_admin_filters<'q>(
@@ -448,6 +456,8 @@ fn bind_admin_filters<'q>(
     query_builder = query_builder.bind(query.status.as_ref().map(|status| status.as_str()));
     query_builder = query_builder.bind(query.hospital_id);
     query_builder = query_builder.bind(query.medical_case_id);
+    query_builder = query_builder.bind(query.from);
+    query_builder = query_builder.bind(query.to);
     query_builder
 }
 

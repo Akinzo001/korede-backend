@@ -70,6 +70,7 @@ use crate::api::{
         crate::api::admin::get_admin_donation,
         crate::api::admin::retry_donation_proof,
         crate::api::admin::list_admin_settlements,
+        crate::api::admin::list_failed_admin_settlements,
         crate::api::admin::get_admin_settlement,
         crate::api::admin::retry_admin_settlement,
         crate::api::hospitals::register_hospital,

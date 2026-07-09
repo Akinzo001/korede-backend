@@ -56,6 +56,27 @@ impl HospitalSettlementStatus {
                 | Self::Reversed
         )
     }
+
+    pub fn requires_admin_action(&self) -> bool {
+        matches!(
+            self,
+            Self::Failed
+                | Self::FailedConfig
+                | Self::BankDetailsRequired
+                | Self::Reversed
+                | Self::OtpRequired
+        )
+    }
+
+    pub fn admin_action_required_values() -> &'static [&'static str] {
+        &[
+            "failed",
+            "failed_config",
+            "bank_details_required",
+            "reversed",
+            "otp_required",
+        ]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

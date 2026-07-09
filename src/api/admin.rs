@@ -42,6 +42,7 @@ pub fn routes() -> Router<AppState> {
             post(retry_donation_proof),
         )
         .route("/settlements", get(list_admin_settlements))
+        .route("/settlements/failed", get(list_failed_admin_settlements))
         .route("/settlements/:settlement_id", get(get_admin_settlement))
         .route(
             "/settlements/:settlement_id/retry",
@@ -244,6 +245,8 @@ pub struct AdminSettlementListParams {
     pub status: Option<String>,
     pub hospital_id: Option<Uuid>,
     pub medical_case_id: Option<Uuid>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -470,7 +473,47 @@ pub async fn list_admin_settlements(
     State(state): State<AppState>,
     Query(params): Query<AdminSettlementListParams>,
 ) -> Result<Json<AdminSettlementsResponse>, ApiError> {
-    let query = admin_settlement_list_query(params)?;
+    let query = admin_settlement_list_query(params, false)?;
+    let total = state
+        .settlement_repository
+        .count_admin_settlements(query.clone())
+        .await?;
+    let settlements = state
+        .settlement_repository
+        .list_admin_settlements(query.clone())
+        .await?
+        .into_iter()
+        .map(AdminSettlementResponse::from)
+        .collect();
+
+    Ok(Json(AdminSettlementsResponse {
+        settlements,
+        pagination: AdminPaginationResponse {
+            limit: query.limit,
+            offset: query.offset,
+            total,
+        },
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/settlements/failed",
+    tag = "Admin",
+    security(("bearer_auth" = [])),
+    params(AdminSettlementListParams),
+    responses(
+        (status = 200, description = "Failed or admin-action hospital settlements.", body = AdminSettlementsResponse),
+        (status = 400, description = "Invalid settlement filter."),
+        (status = 401, description = "Missing or invalid admin bearer token.")
+    )
+)]
+pub async fn list_failed_admin_settlements(
+    _admin: AuthenticatedAdmin,
+    State(state): State<AppState>,
+    Query(params): Query<AdminSettlementListParams>,
+) -> Result<Json<AdminSettlementsResponse>, ApiError> {
+    let query = admin_settlement_list_query(params, true)?;
     let total = state
         .settlement_repository
         .count_admin_settlements(query.clone())
@@ -762,11 +805,27 @@ fn admin_donation_list_query(
 
 fn admin_settlement_list_query(
     params: AdminSettlementListParams,
+    admin_action_required_only: bool,
 ) -> Result<AdminSettlementListQuery, ApiError> {
+    let status = parse_optional_settlement_status(params.status.as_deref())?;
+    if admin_action_required_only
+        && status
+            .as_ref()
+            .is_some_and(|status| !status.requires_admin_action())
+    {
+        return Err(ApiError::BadRequest(
+            "status must be one of failed, failed_config, bank_details_required, reversed, or otp_required"
+                .to_owned(),
+        ));
+    }
+
     Ok(AdminSettlementListQuery {
-        status: parse_optional_settlement_status(params.status.as_deref())?,
+        status,
         hospital_id: params.hospital_id,
         medical_case_id: params.medical_case_id,
+        from: params.from,
+        to: params.to,
+        admin_action_required_only,
         limit: normalize_limit(params.limit)?,
         offset: normalize_offset(params.offset)?,
     })
@@ -1096,10 +1155,23 @@ fn parse_optional_settlement_status(
 }
 
 fn validate_settlement_retry_target(settlement: &HospitalSettlement) -> Result<(), ApiError> {
-    if settlement.status == HospitalSettlementStatus::Paid {
-        return Err(ApiError::Conflict(
-            "hospital settlement is already paid".to_owned(),
-        ));
+    match settlement.status {
+        HospitalSettlementStatus::Paid => {
+            return Err(ApiError::Conflict(
+                "hospital settlement is already paid".to_owned(),
+            ))
+        }
+        HospitalSettlementStatus::Processing => {
+            return Err(ApiError::Conflict(
+                "hospital settlement is still processing".to_owned(),
+            ))
+        }
+        HospitalSettlementStatus::OtpRequired => {
+            return Err(ApiError::Conflict(
+                "hospital settlement requires Paystack OTP finalization".to_owned(),
+            ))
+        }
+        _ => {}
     }
 
     if !settlement.status.can_retry() {
@@ -1533,6 +1605,79 @@ mod tests {
     }
 
     #[test]
+    fn admin_failed_settlement_query_accepts_only_admin_action_statuses() {
+        let query = admin_settlement_list_query(
+            AdminSettlementListParams {
+                status: Some("failed_config".to_owned()),
+                hospital_id: None,
+                medical_case_id: None,
+                from: None,
+                to: None,
+                limit: None,
+                offset: None,
+            },
+            true,
+        )
+        .expect("failed_config should be valid for failed settlement list");
+
+        assert!(query.admin_action_required_only);
+        assert_eq!(query.status, Some(HospitalSettlementStatus::FailedConfig));
+
+        let error = admin_settlement_list_query(
+            AdminSettlementListParams {
+                status: Some("paid".to_owned()),
+                hospital_id: None,
+                medical_case_id: None,
+                from: None,
+                to: None,
+                limit: None,
+                offset: None,
+            },
+            true,
+        )
+        .expect_err("paid is not a failed/admin-action status");
+
+        assert!(matches!(error, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn admin_settlement_pagination_defaults_and_clamps_limit() {
+        let default_query = admin_settlement_list_query(
+            AdminSettlementListParams {
+                status: None,
+                hospital_id: None,
+                medical_case_id: None,
+                from: None,
+                to: None,
+                limit: None,
+                offset: None,
+            },
+            false,
+        )
+        .expect("default pagination should be valid");
+
+        assert_eq!(default_query.limit, 50);
+        assert_eq!(default_query.offset, 0);
+
+        let clamped_query = admin_settlement_list_query(
+            AdminSettlementListParams {
+                status: None,
+                hospital_id: None,
+                medical_case_id: None,
+                from: None,
+                to: None,
+                limit: Some(500),
+                offset: Some(10),
+            },
+            true,
+        )
+        .expect("large limit should be clamped");
+
+        assert_eq!(clamped_query.limit, 100);
+        assert_eq!(clamped_query.offset, 10);
+    }
+
+    #[test]
     fn admin_suiscan_url_uses_network_and_digest() {
         assert_eq!(
             suiscan_transaction_url("testnet", "abc123"),
@@ -1556,6 +1701,36 @@ mod tests {
             validate_manual_retry_target(&donation),
             Err(ApiError::Conflict(_))
         ));
+    }
+
+    #[test]
+    fn settlement_retry_rejects_paid_processing_and_otp_required() {
+        for status in [
+            HospitalSettlementStatus::Paid,
+            HospitalSettlementStatus::Processing,
+            HospitalSettlementStatus::OtpRequired,
+        ] {
+            let settlement = test_settlement(status);
+
+            assert!(matches!(
+                validate_settlement_retry_target(&settlement),
+                Err(ApiError::Conflict(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn settlement_retry_accepts_failed_admin_action_statuses() {
+        for status in [
+            HospitalSettlementStatus::Failed,
+            HospitalSettlementStatus::FailedConfig,
+            HospitalSettlementStatus::BankDetailsRequired,
+            HospitalSettlementStatus::Reversed,
+        ] {
+            let settlement = test_settlement(status);
+
+            assert!(validate_settlement_retry_target(&settlement).is_ok());
+        }
     }
 
     #[test]
@@ -1803,6 +1978,32 @@ mod tests {
             proof_next_retry_at: None,
             proof_last_error: None,
             proof_published_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn test_settlement(status: HospitalSettlementStatus) -> HospitalSettlement {
+        let now = Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap();
+        HospitalSettlement {
+            id: Uuid::new_v4(),
+            hospital_id: Uuid::new_v4(),
+            medical_case_id: Uuid::new_v4(),
+            amount_kobo: 500_000,
+            status,
+            settlement_reference: "korede-settlement-test".to_owned(),
+            bank_name: "Wema Bank".to_owned(),
+            bank_code: Some("035".to_owned()),
+            account_name: "Lagoon Hospital".to_owned(),
+            account_number: "0123456789".to_owned(),
+            paystack_recipient_code: Some("RCP_test".to_owned()),
+            paystack_transfer_code: Some("TRF_test".to_owned()),
+            paystack_transfer_id: Some(123),
+            paystack_status: None,
+            failure_reason: None,
+            initiated_at: Some(now),
+            paid_at: None,
+            failed_at: None,
             created_at: now,
             updated_at: now,
         }
