@@ -29,7 +29,7 @@ use crate::{
             NewHospitalEmailOtp, NewHospitalLoginOtp,
         },
         medical_case::{
-            HospitalActiveMedicalCase, NewMedicalCase, NewMedicalCaseBillingItem,
+            HospitalMedicalCaseSummary, NewMedicalCase, NewMedicalCaseBillingItem,
             NewMedicalCaseDocument,
         },
     },
@@ -53,6 +53,7 @@ pub fn routes() -> Router<AppState> {
             get(get_patient_declaration),
         )
         .route("/cases/active", get(list_active_cases))
+        .route("/cases/completed", get(list_completed_cases))
         .route("/cases", post(create_case))
 }
 
@@ -284,6 +285,29 @@ pub struct HospitalActiveCasesResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HospitalActiveCaseResponse {
+    pub id: Uuid,
+    pub patient_id: Uuid,
+    pub patient_name: String,
+    pub title: String,
+    pub public_slug: String,
+    pub public_link: String,
+    pub diagnosis_summary: String,
+    pub bill_amount_kobo: i64,
+    pub amount_raised_kobo: i64,
+    pub remaining_amount_kobo: i64,
+    pub status: String,
+    pub admitted_at: Option<NaiveDate>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalCompletedCasesResponse {
+    pub cases: Vec<HospitalCompletedCaseResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HospitalCompletedCaseResponse {
     pub id: Uuid,
     pub patient_id: Uuid,
     pub patient_name: String,
@@ -1124,6 +1148,31 @@ pub async fn list_active_cases(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/hospitals/cases/completed",
+    tag = "Hospitals",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Completed medical cases for the authenticated hospital.", body = HospitalCompletedCasesResponse),
+        (status = 401, description = "Missing or invalid hospital bearer token.")
+    )
+)]
+pub async fn list_completed_cases(
+    authenticated: AuthenticatedHospital,
+    State(state): State<AppState>,
+) -> Result<Json<HospitalCompletedCasesResponse>, ApiError> {
+    let cases = state
+        .medical_case_repository
+        .list_hospital_completed_cases(authenticated.hospital_id)
+        .await?
+        .into_iter()
+        .map(HospitalCompletedCaseResponse::from)
+        .collect();
+
+    Ok(Json(HospitalCompletedCasesResponse { cases }))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/hospitals/cases",
     tag = "Hospitals",
@@ -1778,15 +1827,42 @@ impl From<MedicalCase> for HospitalCaseResponse {
     }
 }
 
-impl From<HospitalActiveMedicalCase> for HospitalActiveCaseResponse {
-    fn from(active_case: HospitalActiveMedicalCase) -> Self {
-        let medical_case = active_case.case;
+impl From<HospitalMedicalCaseSummary> for HospitalActiveCaseResponse {
+    fn from(summary: HospitalMedicalCaseSummary) -> Self {
+        let medical_case = summary.case;
         let public_slug = medical_case.public_slug.clone().unwrap_or_default();
 
         Self {
             id: medical_case.id,
             patient_id: medical_case.patient_id,
-            patient_name: active_case.patient_name,
+            patient_name: summary.patient_name,
+            title: medical_case.title,
+            public_slug: public_slug.clone(),
+            public_link: public_case_link(&public_slug),
+            diagnosis_summary: medical_case.diagnosis_summary,
+            bill_amount_kobo: medical_case.bill_amount_kobo,
+            amount_raised_kobo: medical_case.amount_raised_kobo,
+            remaining_amount_kobo: remaining_case_amount_kobo(
+                medical_case.bill_amount_kobo,
+                medical_case.amount_raised_kobo,
+            ),
+            status: medical_case.status.as_str().to_owned(),
+            admitted_at: medical_case.admitted_at,
+            created_at: medical_case.created_at,
+            updated_at: medical_case.updated_at,
+        }
+    }
+}
+
+impl From<HospitalMedicalCaseSummary> for HospitalCompletedCaseResponse {
+    fn from(summary: HospitalMedicalCaseSummary) -> Self {
+        let medical_case = summary.case;
+        let public_slug = medical_case.public_slug.clone().unwrap_or_default();
+
+        Self {
+            id: medical_case.id,
+            patient_id: medical_case.patient_id,
+            patient_name: summary.patient_name,
             title: medical_case.title,
             public_slug: public_slug.clone(),
             public_link: public_case_link(&public_slug),
@@ -1862,10 +1938,10 @@ mod tests {
     fn hospital_active_case_with_amounts(
         bill_amount_kobo: i64,
         amount_raised_kobo: i64,
-    ) -> HospitalActiveMedicalCase {
+    ) -> HospitalMedicalCaseSummary {
         let now = Utc::now();
 
-        HospitalActiveMedicalCase {
+        HospitalMedicalCaseSummary {
             case: MedicalCase {
                 id: Uuid::new_v4(),
                 hospital_id: Uuid::new_v4(),
@@ -2090,6 +2166,18 @@ mod tests {
     }
 
     #[test]
+    fn hospital_completed_case_response_includes_public_link_and_remaining_amount() {
+        let response = HospitalCompletedCaseResponse::from(hospital_active_case_with_amounts(
+            500_000, 500_000,
+        ));
+
+        assert_eq!(response.public_slug, "andrew-surgery-12345678");
+        assert_eq!(response.public_link, "/cases/andrew-surgery-12345678");
+        assert_eq!(response.patient_name, "Andrew Andrew");
+        assert_eq!(response.remaining_amount_kobo, 0);
+    }
+
+    #[test]
     fn active_case_filter_includes_open_statuses() {
         for status in [
             MedicalCaseStatus::Draft,
@@ -2106,6 +2194,26 @@ mod tests {
     fn active_case_filter_excludes_closed_statuses() {
         for status in [MedicalCaseStatus::Discharged, MedicalCaseStatus::Cancelled] {
             assert!(!MedicalCaseStatus::open_status_values().contains(&status.as_str()));
+        }
+    }
+
+    #[test]
+    fn completed_case_filter_includes_terminal_statuses() {
+        for status in [MedicalCaseStatus::Discharged, MedicalCaseStatus::Cancelled] {
+            assert!(MedicalCaseStatus::completed_status_values().contains(&status.as_str()));
+        }
+    }
+
+    #[test]
+    fn completed_case_filter_excludes_open_statuses() {
+        for status in [
+            MedicalCaseStatus::Draft,
+            MedicalCaseStatus::PendingReview,
+            MedicalCaseStatus::Active,
+            MedicalCaseStatus::Funded,
+            MedicalCaseStatus::TreatmentCommenced,
+        ] {
+            assert!(!MedicalCaseStatus::completed_status_values().contains(&status.as_str()));
         }
     }
 

@@ -72,6 +72,10 @@ impl MedicalCaseStatus {
         ]
     }
 
+    pub fn completed_status_values() -> &'static [&'static str] {
+        &["discharged", "cancelled"]
+    }
+
     pub fn from_str(value: &str) -> Self {
         match value {
             "draft" => Self::Draft,
@@ -176,6 +180,14 @@ mod tests {
                 "funded",
                 "treatment_commenced",
             ]
+        );
+    }
+
+    #[test]
+    fn completed_status_values_match_terminal_lifecycle() {
+        assert_eq!(
+            MedicalCaseStatus::completed_status_values(),
+            &["discharged", "cancelled"]
         );
     }
 }

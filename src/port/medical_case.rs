@@ -46,7 +46,7 @@ pub struct CreatedMedicalCase {
 }
 
 #[derive(Debug, Clone)]
-pub struct HospitalActiveMedicalCase {
+pub struct HospitalMedicalCaseSummary {
     pub case: MedicalCase,
     pub patient_name: String,
 }
@@ -83,7 +83,12 @@ pub trait MedicalCaseRepository: Send + Sync {
     async fn list_hospital_active_cases(
         &self,
         hospital_id: Uuid,
-    ) -> Result<Vec<HospitalActiveMedicalCase>, MedicalCaseRepositoryError>;
+    ) -> Result<Vec<HospitalMedicalCaseSummary>, MedicalCaseRepositoryError>;
+
+    async fn list_hospital_completed_cases(
+        &self,
+        hospital_id: Uuid,
+    ) -> Result<Vec<HospitalMedicalCaseSummary>, MedicalCaseRepositoryError>;
 
     async fn find_case_by_public_slug(
         &self,
