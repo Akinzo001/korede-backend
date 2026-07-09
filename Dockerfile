@@ -52,6 +52,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system app \
     && useradd --system --create-home --gid app app \
+    && { getent group 1000 >/dev/null || groupadd --gid 1000 render-secrets; } \
+    && usermod --append --groups "$(getent group 1000 | cut -d: -f1)" app \
     && mkdir -p /app/storage /tmp/korede-sui \
     && chown -R app:app /app /tmp/korede-sui
 

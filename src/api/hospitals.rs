@@ -238,7 +238,7 @@ pub struct CreateHospitalCaseRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateHospitalCaseBillingItemRequest {
     pub description: String,
-    pub amount_kobo: i64,
+    pub amount: i64,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1171,11 +1171,13 @@ pub async fn create_case(
     let billing_items = request
         .billing_items
         .iter()
-        .map(|item| NewMedicalCaseBillingItem {
-            description: item.description.trim().to_owned(),
-            amount_kobo: item.amount_kobo,
+        .map(|item| {
+            Ok(NewMedicalCaseBillingItem {
+                description: item.description.trim().to_owned(),
+                amount_kobo: crate::api::money::naira_to_kobo(item.amount, "billing item amount")?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, ApiError>>()?;
     let bill_amount_kobo = billing_items.iter().try_fold(0_i64, |total, item| {
         total
             .checked_add(item.amount_kobo)
@@ -1329,7 +1331,7 @@ fn validate_create_case_request(request: &CreateHospitalCaseRequest) -> Result<(
             ));
         }
 
-        if item.amount_kobo <= 0 {
+        if item.amount <= 0 {
             return Err(ApiError::BadRequest(
                 "billing item amount must be greater than zero".to_owned(),
             ));
@@ -1808,7 +1810,7 @@ mod tests {
             admitted_at: None,
             billing_items: vec![CreateHospitalCaseBillingItemRequest {
                 description: "Surgery".to_owned(),
-                amount_kobo: 150_000_000,
+                amount: 1_500_000,
             }],
             documents: vec![],
         }
@@ -1916,7 +1918,7 @@ mod tests {
     #[test]
     fn case_creation_validation_rejects_non_positive_billing_amount() {
         let mut request = valid_case_request();
-        request.billing_items[0].amount_kobo = 0;
+        request.billing_items[0].amount = 0;
 
         assert!(matches!(
             validate_create_case_request(&request),

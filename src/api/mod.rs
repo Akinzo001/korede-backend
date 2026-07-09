@@ -8,6 +8,7 @@ pub mod error;
 // Expose the health-check routes module.
 pub mod health;
 pub mod hospitals;
+mod money;
 pub mod patients;
 pub mod payments;
 pub mod tokens;

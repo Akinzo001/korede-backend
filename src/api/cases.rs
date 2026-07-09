@@ -9,7 +9,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    api::{error::ApiError, AppState},
+    api::{error::ApiError, money::naira_to_kobo, AppState},
     domain::{
         donation::{CaseDva, Donation},
         patient_declaration::PatientDeclaration,
@@ -82,7 +82,7 @@ pub struct PublicDonationResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct InitializeDonationRequest {
     pub payment_method: String,
-    pub amount_kobo: Option<i64>,
+    pub amount: Option<i64>,
     pub donor_email: Option<String>,
     pub donor_name: Option<String>,
 }
@@ -231,9 +231,10 @@ pub async fn initialize_case_donation(
 
     match payment_method {
         PaymentMethod::Checkout => {
-            let amount_kobo = request.amount_kobo.ok_or_else(|| {
-                ApiError::BadRequest("amount_kobo is required for checkout donations".to_owned())
+            let amount = request.amount.ok_or_else(|| {
+                ApiError::BadRequest("amount is required for checkout donations".to_owned())
             })?;
+            let amount_kobo = naira_to_kobo(amount, "donation amount")?;
             let donor_email = request.donor_email.as_deref().ok_or_else(|| {
                 ApiError::BadRequest("donor_email is required for checkout donations".to_owned())
             })?;

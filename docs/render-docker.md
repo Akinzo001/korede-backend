@@ -37,6 +37,9 @@ Render mounts the file at:
 /etc/secrets/sui.keystore
 ```
 
+The container's non-root application user belongs to group `1000`, allowing it
+to read Render runtime secret files.
+
 Never commit the keystore, generated client YAML, aliases, recovery phrase, or
 local `.env` file.
 
