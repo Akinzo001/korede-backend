@@ -4,6 +4,10 @@ This Sui Move package records public donation proofs for Korede.
 
 It does not move donor money and does not store private medical data. The backend should send hashed identifiers for `case_id`, `hospital_id`, and `payment_reference`.
 
+Donation amounts are submitted as integer minor units and split inside the Move
+module for readable Sui records and events. For example, `70000` is recorded as
+`amount: 700` and `kobo: 0`, representing NGN 700.00 without losing precision.
+
 ## Local Commands
 
 Run these from this directory after installing Sui CLI:
@@ -41,6 +45,9 @@ SUI_RPC_URL=https://sui-testnet.grpc.ankr.com:443
 SUI_CLOCK_OBJECT_ID=0x6
 SUI_REQUEST_TIMEOUT_SECONDS=30
 ```
+
+Changing the donation record/event layout requires publishing this package
+version and updating `SUI_PACKAGE_ID` before the backend can use it.
 
 ## Backend Proof Publishing
 

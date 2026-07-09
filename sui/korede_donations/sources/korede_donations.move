@@ -18,7 +18,8 @@ public struct DonationRecord has key, store {
     authority: address,
     case_id: vector<u8>,
     hospital_id: vector<u8>,
-    amount_kobo: u64,
+    amount: u64,
+    kobo: u64,
     payment_reference: vector<u8>,
     recorded_at_ms: u64,
 }
@@ -28,7 +29,8 @@ public struct DonationRecorded has copy, drop {
     authority: address,
     case_id: vector<u8>,
     hospital_id: vector<u8>,
-    amount_kobo: u64,
+    amount: u64,
+    kobo: u64,
     payment_reference: vector<u8>,
     recorded_at_ms: u64,
     record_object_id: ID,
@@ -38,22 +40,29 @@ public fun record_donation(
     donor: address,
     case_id: vector<u8>,
     hospital_id: vector<u8>,
-    amount_kobo: u64,
+    amount_minor_units: u64,
     payment_reference: vector<u8>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
-    validate_inputs(&case_id, &hospital_id, amount_kobo, &payment_reference);
+    validate_inputs(
+        &case_id,
+        &hospital_id,
+        amount_minor_units,
+        &payment_reference,
+    );
 
     let authority = tx_context::sender(ctx);
     let recorded_at_ms = clock::timestamp_ms(clock);
+    let (amount, kobo) = split_amount(amount_minor_units);
     let record = DonationRecord {
         id: object::new(ctx),
         donor,
         authority,
         case_id,
         hospital_id,
-        amount_kobo,
+        amount,
+        kobo,
         payment_reference,
         recorded_at_ms,
     };
@@ -64,7 +73,8 @@ public fun record_donation(
         authority,
         case_id: record.case_id,
         hospital_id: record.hospital_id,
-        amount_kobo,
+        amount,
+        kobo,
         payment_reference: record.payment_reference,
         recorded_at_ms,
         record_object_id,
@@ -76,10 +86,10 @@ public fun record_donation(
 fun validate_inputs(
     case_id: &vector<u8>,
     hospital_id: &vector<u8>,
-    amount_kobo: u64,
+    amount_minor_units: u64,
     payment_reference: &vector<u8>,
 ) {
-    assert!(amount_kobo > 0, E_INVALID_AMOUNT);
+    assert!(amount_minor_units > 0, E_INVALID_AMOUNT);
     assert!(!vector::is_empty(case_id), E_EMPTY_CASE_ID);
     assert!(!vector::is_empty(hospital_id), E_EMPTY_HOSPITAL_ID);
     assert!(
@@ -88,12 +98,26 @@ fun validate_inputs(
     );
 }
 
+fun split_amount(amount_minor_units: u64): (u64, u64) {
+    (amount_minor_units / 100, amount_minor_units % 100)
+}
+
 #[test_only]
 public fun assert_valid_inputs_for_tests(
     case_id: vector<u8>,
     hospital_id: vector<u8>,
-    amount_kobo: u64,
+    amount_minor_units: u64,
     payment_reference: vector<u8>,
 ) {
-    validate_inputs(&case_id, &hospital_id, amount_kobo, &payment_reference);
+    validate_inputs(
+        &case_id,
+        &hospital_id,
+        amount_minor_units,
+        &payment_reference,
+    );
+}
+
+#[test_only]
+public fun split_amount_for_tests(amount_minor_units: u64): (u64, u64) {
+    split_amount(amount_minor_units)
 }

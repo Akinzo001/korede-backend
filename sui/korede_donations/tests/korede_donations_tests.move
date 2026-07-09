@@ -4,6 +4,18 @@ module korede_donations::korede_donations_tests;
 use korede_donations::korede_donations;
 
 #[test]
+fun amount_is_split_into_naira_and_kobo() {
+    let (amount, kobo) = korede_donations::split_amount_for_tests(70_000);
+    assert!(amount == 700, 0);
+    assert!(kobo == 0, 1);
+
+    let (amount_with_fraction, fractional_kobo) =
+        korede_donations::split_amount_for_tests(70_050);
+    assert!(amount_with_fraction == 700, 2);
+    assert!(fractional_kobo == 50, 3);
+}
+
+#[test]
 fun valid_inputs_are_accepted() {
     korede_donations::assert_valid_inputs_for_tests(
         b"case-id-hash",
