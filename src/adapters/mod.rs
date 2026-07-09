@@ -8,6 +8,7 @@
 //
 // `pub mod db;` makes the db module available to the rest of the app.
 pub mod auth;
+pub mod checkout_reservation;
 pub mod db;
 pub mod donation_proof;
 pub mod donation_proof_retry;

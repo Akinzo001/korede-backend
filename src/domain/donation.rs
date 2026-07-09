@@ -8,6 +8,7 @@ pub enum DonationStatus {
     Pending,
     Paid,
     Failed,
+    Expired,
     RejectedOverflow,
 }
 
@@ -17,6 +18,7 @@ impl DonationStatus {
             Self::Pending => "pending",
             Self::Paid => "paid",
             Self::Failed => "failed",
+            Self::Expired => "expired",
             Self::RejectedOverflow => "rejected_overflow",
         }
     }
@@ -25,6 +27,7 @@ impl DonationStatus {
         match value {
             "paid" => Self::Paid,
             "failed" => Self::Failed,
+            "expired" => Self::Expired,
             "rejected_overflow" => Self::RejectedOverflow,
             _ => Self::Pending,
         }
@@ -103,6 +106,10 @@ pub struct Donation {
     pub paystack_dedicated_bank_slug: Option<String>,
     pub status: DonationStatus,
     pub paid_at: Option<DateTime<Utc>>,
+    pub reservation_expires_at: Option<DateTime<Utc>>,
+    pub expired_at: Option<DateTime<Utc>>,
+    pub is_late_payment: bool,
+    pub payment_note: Option<String>,
     pub proof_status: DonationProofStatus,
     pub sui_network: Option<String>,
     pub sui_tx_digest: Option<String>,

@@ -9,6 +9,8 @@ use crate::domain::{
     public_case::PublicCaseDetails,
 };
 
+pub const CHECKOUT_RESERVATION_SECONDS: i64 = 5 * 60;
+
 #[derive(Debug, Clone)]
 pub struct NewDonation {
     pub medical_case_id: Uuid,
@@ -26,6 +28,14 @@ pub struct NewDonation {
     pub paystack_dedicated_account_name: Option<String>,
     pub paystack_dedicated_bank_name: Option<String>,
     pub paystack_dedicated_bank_slug: Option<String>,
+    pub reservation_expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckoutInitializationUpdate {
+    pub donation_id: Uuid,
+    pub paystack_access_code: String,
+    pub paystack_authorization_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +55,8 @@ pub struct DonationPaymentUpdate {
     pub donation_id: Uuid,
     pub paystack_transaction_reference: String,
     pub paid_at: DateTime<Utc>,
+    pub is_late_payment: bool,
+    pub payment_note: Option<String>,
     pub proof_status: DonationProofStatus,
     pub sui_network: Option<String>,
     pub sui_tx_digest: Option<String>,
@@ -53,6 +65,22 @@ pub struct DonationPaymentUpdate {
     pub proof_next_retry_at: Option<DateTime<Utc>>,
     pub proof_last_error: Option<String>,
     pub proof_published_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DonationPaymentResult {
+    pub donation: Donation,
+    pub newly_paid: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DonationFundingAvailability {
+    pub confirmed_amount_kobo: i64,
+    pub pending_amount_kobo: i64,
+    pub remaining_amount_kobo: i64,
+    pub available_amount_kobo: i64,
+    pub active_pending_payment_count: i64,
+    pub next_reservation_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +123,7 @@ pub struct AdminDonationFilters {
     pub hospital_id: Option<Uuid>,
     pub medical_case_id: Option<Uuid>,
     pub paystack_reference: Option<String>,
+    pub is_late_payment: Option<bool>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
 }
@@ -131,6 +160,9 @@ pub enum DonationRepositoryError {
     #[error("payment amount exceeds remaining case amount")]
     AmountExceedsRemaining,
 
+    #[error("donation amount exceeds currently available amount")]
+    AmountExceedsAvailable,
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -141,6 +173,22 @@ pub trait DonationRepository: Send + Sync {
         &self,
         donation: NewDonation,
     ) -> Result<Donation, DonationRepositoryError>;
+
+    async fn attach_checkout_initialization(
+        &self,
+        update: CheckoutInitializationUpdate,
+    ) -> Result<Donation, DonationRepositoryError>;
+
+    async fn expire_checkout_reservations(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<u64, DonationRepositoryError>;
+
+    async fn get_case_funding_availability(
+        &self,
+        medical_case_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<DonationFundingAvailability, DonationRepositoryError>;
 
     async fn create_paid_donation(
         &self,
@@ -206,7 +254,7 @@ pub trait DonationRepository: Send + Sync {
     async fn mark_donation_paid(
         &self,
         update: DonationPaymentUpdate,
-    ) -> Result<Donation, DonationRepositoryError>;
+    ) -> Result<DonationPaymentResult, DonationRepositoryError>;
 
     async fn update_donation_proof(
         &self,

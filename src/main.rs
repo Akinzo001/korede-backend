@@ -8,6 +8,7 @@
 use korede_backend::{
     adapters::{
         auth::{Argon2PasswordHasher, JwtTokenService},
+        checkout_reservation::run_checkout_reservation_expiry_worker,
         db::{
             donation_repository::PostgresDonationRepository,
             hospital_repository::PostgresHospitalRepository,
@@ -89,6 +90,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let retry_publisher = donation_proof_publisher.clone();
     tokio::spawn(async move {
         run_donation_proof_retry_worker(retry_repository, retry_publisher).await;
+    });
+
+    let reservation_repository = donation_repository.clone();
+    tokio::spawn(async move {
+        run_checkout_reservation_expiry_worker(reservation_repository).await;
     });
 
     let state = AppState {

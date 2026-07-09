@@ -145,6 +145,7 @@ pub struct AdminDonationListParams {
     pub hospital_id: Option<Uuid>,
     pub medical_case_id: Option<Uuid>,
     pub paystack_reference: Option<String>,
+    pub is_late_payment: Option<bool>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     pub limit: Option<i64>,
@@ -173,6 +174,11 @@ pub struct AdminDonationSummaryResponse {
     pub donor_display_name: String,
     pub donor_email: String,
     pub paid_at: Option<DateTime<Utc>>,
+    pub reservation_expires_at: Option<DateTime<Utc>>,
+    pub expired_at: Option<DateTime<Utc>>,
+    pub is_late_payment: bool,
+    pub payment_note: Option<String>,
+    pub requires_admin_action: bool,
     pub created_at: DateTime<Utc>,
     pub paystack_reference: String,
     pub paystack_transaction_reference: Option<String>,
@@ -572,6 +578,7 @@ fn admin_donation_list_query(
                 .paystack_reference
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
+            is_late_payment: params.is_late_payment,
             from: params.from,
             to: params.to,
         },
@@ -796,10 +803,11 @@ fn parse_optional_donation_status(value: Option<&str>) -> Result<Option<Donation
         "pending" => DonationStatus::Pending,
         "paid" => DonationStatus::Paid,
         "failed" => DonationStatus::Failed,
+        "expired" => DonationStatus::Expired,
         "rejected_overflow" => DonationStatus::RejectedOverflow,
         _ => {
             return Err(ApiError::BadRequest(
-                "status must be pending, paid, failed, or rejected_overflow".to_owned(),
+                "status must be pending, paid, failed, expired, or rejected_overflow".to_owned(),
             ))
         }
     };
@@ -1038,6 +1046,12 @@ impl From<AdminDonationOperation> for AdminDonationSummaryResponse {
             donor_display_name: donation.donor_display_name,
             donor_email: donation.donor_email,
             paid_at: donation.paid_at,
+            reservation_expires_at: donation.reservation_expires_at,
+            expired_at: donation.expired_at,
+            is_late_payment: donation.is_late_payment,
+            payment_note: donation.payment_note,
+            requires_admin_action: donation.status == DonationStatus::RejectedOverflow
+                && donation.paystack_transaction_reference.is_some(),
             created_at: donation.created_at,
             paystack_reference: donation.paystack_reference,
             paystack_transaction_reference: donation.paystack_transaction_reference,
@@ -1161,6 +1175,7 @@ mod tests {
             hospital_id: None,
             medical_case_id: None,
             paystack_reference: None,
+            is_late_payment: None,
             from: None,
             to: None,
             limit: None,
@@ -1174,6 +1189,14 @@ mod tests {
     }
 
     #[test]
+    fn admin_donation_filters_accept_expired_checkout_status() {
+        assert_eq!(
+            parse_optional_donation_status(Some("expired")).unwrap(),
+            Some(DonationStatus::Expired)
+        );
+    }
+
+    #[test]
     fn admin_donation_pagination_defaults_and_clamps_limit() {
         let default_query = admin_donation_list_query(AdminDonationListParams {
             status: None,
@@ -1182,6 +1205,7 @@ mod tests {
             hospital_id: None,
             medical_case_id: None,
             paystack_reference: None,
+            is_late_payment: None,
             from: None,
             to: None,
             limit: None,
@@ -1199,6 +1223,7 @@ mod tests {
             hospital_id: None,
             medical_case_id: None,
             paystack_reference: None,
+            is_late_payment: None,
             from: None,
             to: None,
             limit: Some(500),
@@ -1219,6 +1244,7 @@ mod tests {
             hospital_id: None,
             medical_case_id: None,
             paystack_reference: None,
+            is_late_payment: None,
             from: None,
             to: None,
             limit: Some(25),
@@ -1490,6 +1516,10 @@ mod tests {
             paystack_dedicated_bank_slug: None,
             status,
             paid_at: None,
+            reservation_expires_at: None,
+            expired_at: None,
+            is_late_payment: false,
+            payment_note: None,
             proof_status,
             sui_network: None,
             sui_tx_digest: None,

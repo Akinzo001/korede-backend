@@ -62,6 +62,9 @@ SUI_REQUEST_TIMEOUT_SECONDS=30
 Keep the existing database, JWT, Paystack, email, storage, and application
 environment values unchanged.
 
+Configure Paystack's Payment Session Timeout to five minutes so hosted checkout
+sessions match the backend's five-minute reservation window.
+
 ## How Startup Works
 
 The container starts as a non-root user. When Sui publishing is enabled, the

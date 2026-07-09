@@ -197,6 +197,14 @@ async fn finalize_checkout_donation(
         });
     }
 
+    if locked.donation.status == DonationStatus::RejectedOverflow {
+        return Ok(PaymentConfirmationOutcome {
+            status: "overflow_rejected".to_owned(),
+            donation_id: Some(locked.donation.id),
+            payment_status: Some(locked.donation.status),
+        });
+    }
+
     let verification = state.payment_gateway.verify_payment(reference).await?;
 
     if verification.status == PaymentVerificationStatus::Pending {
@@ -242,85 +250,110 @@ async fn finalize_checkout_donation(
     }
 
     let now = Utc::now();
-    let attempt_count = locked.donation.proof_attempt_count + 1;
+    let paid_at = verification.paid_at.unwrap_or(now);
+    let is_late_payment = is_late_checkout_payment(locked.donation.reservation_expires_at, paid_at);
+    let payment_note = is_late_payment.then(|| {
+        "Payment completed after the five-minute checkout reservation expired.".to_owned()
+    });
+
+    let payment_result = match state
+        .donation_repository
+        .mark_donation_paid(DonationPaymentUpdate {
+            donation_id: locked.donation.id,
+            paystack_transaction_reference: verification.provider_reference,
+            paid_at,
+            is_late_payment,
+            payment_note: payment_note.clone(),
+            proof_status: locked.donation.proof_status.clone(),
+            sui_network: locked.donation.sui_network.clone(),
+            sui_tx_digest: locked.donation.sui_tx_digest.clone(),
+            proof_attempt_count: locked.donation.proof_attempt_count,
+            proof_last_attempt_at: locked.donation.proof_last_attempt_at,
+            proof_next_retry_at: locked.donation.proof_next_retry_at,
+            proof_last_error: locked.donation.proof_last_error.clone(),
+            proof_published_at: locked.donation.proof_published_at,
+        })
+        .await
+    {
+        Ok(result) => result,
+        Err(crate::port::donation::DonationRepositoryError::AmountExceedsRemaining) => {
+            return Ok(PaymentConfirmationOutcome {
+                status: "overflow_rejected".to_owned(),
+                donation_id: Some(locked.donation.id),
+                payment_status: Some(DonationStatus::RejectedOverflow),
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    if !payment_result.newly_paid {
+        return Ok(PaymentConfirmationOutcome {
+            status: "already_processed".to_owned(),
+            donation_id: Some(payment_result.donation.id),
+            payment_status: Some(payment_result.donation.status),
+        });
+    }
+
+    let donation = payment_result.donation;
+    let attempt_count = donation.proof_attempt_count + 1;
     let proof_result = state
         .donation_proof_publisher
         .publish_donation_proof(DonationProofRequest {
             case_id: locked.medical_case.id.to_string(),
             hospital_id: locked.medical_case.hospital_id.to_string(),
-            amount_kobo: locked.donation.amount_kobo as u64,
-            payment_reference: locked.donation.paystack_reference.clone(),
+            amount_kobo: donation.amount_kobo as u64,
+            payment_reference: donation.paystack_reference.clone(),
         })
         .await;
 
-    let (
-        proof_status,
-        sui_network,
-        sui_tx_digest,
-        proof_next_retry_at,
-        proof_last_error,
-        proof_published_at,
-    ) = match proof_result {
-        Ok(receipt) => (
-            DonationProofStatus::Published,
-            Some(receipt.network),
-            Some(receipt.tx_digest),
-            None,
-            None,
-            Some(now),
-        ),
+    let proof_update = match proof_result {
+        Ok(receipt) => crate::port::donation::DonationProofAttemptUpdate {
+            donation_id: donation.id,
+            proof_status: DonationProofStatus::Published,
+            sui_network: Some(receipt.network),
+            sui_tx_digest: Some(receipt.tx_digest),
+            proof_attempt_count: attempt_count,
+            proof_last_attempt_at: now,
+            proof_next_retry_at: None,
+            proof_last_error: None,
+            proof_published_at: Some(now),
+        },
         Err(error) => {
             tracing::error!(%error, "failed to publish donation proof");
-            (
-                DonationProofStatus::PendingRetry,
-                None,
-                None,
-                next_retry_at(attempt_count, now),
-                Some(error.to_string()),
-                None,
-            )
+            crate::port::donation::DonationProofAttemptUpdate {
+                donation_id: donation.id,
+                proof_status: DonationProofStatus::PendingRetry,
+                sui_network: None,
+                sui_tx_digest: None,
+                proof_attempt_count: attempt_count,
+                proof_last_attempt_at: now,
+                proof_next_retry_at: next_retry_at(attempt_count, now),
+                proof_last_error: Some(error.to_string()),
+                proof_published_at: None,
+            }
         }
     };
-
-    match state
+    let donation = state
         .donation_repository
-        .mark_donation_paid(DonationPaymentUpdate {
-            donation_id: locked.donation.id,
-            paystack_transaction_reference: verification.provider_reference,
-            paid_at: verification.paid_at.unwrap_or(now),
-            proof_status,
-            sui_network,
-            sui_tx_digest,
-            proof_attempt_count: attempt_count,
-            proof_last_attempt_at: Some(now),
-            proof_next_retry_at,
-            proof_last_error,
-            proof_published_at,
-        })
-        .await
-    {
-        Ok(donation) => {
-            maybe_close_case_dva(
-                &state,
-                locked.medical_case.id,
-                locked.remaining_amount_kobo - donation.amount_kobo,
-            )
-            .await?;
-            Ok(PaymentConfirmationOutcome {
-                status: "processed".to_owned(),
-                donation_id: Some(donation.id),
-                payment_status: Some(donation.status),
-            })
-        }
-        Err(crate::port::donation::DonationRepositoryError::AmountExceedsRemaining) => {
-            Ok(PaymentConfirmationOutcome {
-                status: "overflow_rejected".to_owned(),
-                donation_id: Some(locked.donation.id),
-                payment_status: Some(DonationStatus::RejectedOverflow),
-            })
-        }
-        Err(error) => Err(error.into()),
-    }
+        .update_donation_proof(proof_update)
+        .await?;
+
+    maybe_close_case_dva(
+        &state,
+        locked.medical_case.id,
+        locked.remaining_amount_kobo - donation.amount_kobo,
+    )
+    .await?;
+
+    Ok(PaymentConfirmationOutcome {
+        status: if is_late_payment {
+            "processed_late".to_owned()
+        } else {
+            "processed".to_owned()
+        },
+        donation_id: Some(donation.id),
+        payment_status: Some(donation.status),
+    })
 }
 
 async fn finalize_dva_donation(
@@ -388,6 +421,7 @@ async fn finalize_dva_donation(
                 paystack_dedicated_account_name: Some(case_dva.account_name.clone()),
                 paystack_dedicated_bank_name: Some(case_dva.bank_name.clone()),
                 paystack_dedicated_bank_slug: case_dva.bank_slug.clone(),
+                reservation_expires_at: None,
             },
             verification.paid_at.unwrap_or_else(Utc::now),
         )
@@ -516,9 +550,10 @@ fn existing_dva_webhook_status(
 ) -> Option<&'static str> {
     match existing.status {
         DonationStatus::Paid => Some("already_processed"),
-        DonationStatus::Pending | DonationStatus::Failed | DonationStatus::RejectedOverflow => {
-            Some("ignored")
-        }
+        DonationStatus::Pending
+        | DonationStatus::Failed
+        | DonationStatus::Expired
+        | DonationStatus::RejectedOverflow => Some("ignored"),
     }
 }
 
@@ -530,9 +565,17 @@ fn remaining_amount_after_dva_confirmation(
     (bill_amount_kobo - (amount_raised_kobo + donation_amount_kobo)).max(0)
 }
 
+fn is_late_checkout_payment(
+    reservation_expires_at: Option<chrono::DateTime<Utc>>,
+    paid_at: chrono::DateTime<Utc>,
+) -> bool {
+    reservation_expires_at.is_some_and(|expires_at| paid_at > expires_at)
+}
+
 fn verification_message(status: &str) -> &'static str {
     match status {
         "processed" => "Payment verified and donation marked as paid.",
+        "processed_late" => "Late payment verified and applied to the medical case.",
         "already_processed" => "Donation was already marked as paid.",
         "pending" => "Paystack has not confirmed this payment yet.",
         "failed" => "Paystack reported that this payment failed.",
@@ -615,6 +658,10 @@ mod tests {
             paystack_dedicated_bank_slug: Some("test-bank".to_owned()),
             status,
             paid_at: Some(now),
+            reservation_expires_at: None,
+            expired_at: None,
+            is_late_payment: false,
+            payment_note: None,
             proof_status: DonationProofStatus::Pending,
             sui_network: None,
             sui_tx_digest: None,
@@ -663,5 +710,20 @@ mod tests {
             remaining_amount_after_dva_confirmation(10_000, 9_000, 1_500),
             0
         );
+    }
+
+    #[test]
+    fn checkout_payment_is_late_only_when_provider_paid_at_is_after_expiry() {
+        let expires_at = Utc::now();
+
+        assert!(!is_late_checkout_payment(
+            Some(expires_at),
+            expires_at - chrono::TimeDelta::seconds(1)
+        ));
+        assert!(!is_late_checkout_payment(Some(expires_at), expires_at));
+        assert!(is_late_checkout_payment(
+            Some(expires_at),
+            expires_at + chrono::TimeDelta::seconds(1)
+        ));
     }
 }

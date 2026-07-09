@@ -128,6 +128,9 @@ impl From<DonationRepositoryError> for ApiError {
             DonationRepositoryError::AmountExceedsRemaining => {
                 Self::Conflict("payment amount exceeds the remaining case amount".to_owned())
             }
+            DonationRepositoryError::AmountExceedsAvailable => Self::Conflict(
+                "donation amount exceeds the amount currently available to reserve".to_owned(),
+            ),
             DonationRepositoryError::Database(error) => {
                 tracing::error!(%error, "database operation failed");
                 Self::Internal("internal server error".to_owned())
