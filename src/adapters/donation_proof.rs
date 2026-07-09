@@ -283,16 +283,21 @@ async fn run_sui_command(
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
     }
 
+    let stdout = sanitize_sui_error(&String::from_utf8_lossy(&output.stdout));
     let stderr = sanitize_sui_error(&String::from_utf8_lossy(&output.stderr));
-    if tolerate_existing_env_error && is_existing_environment_error(&stderr) {
+    if should_tolerate_existing_environment_error(tolerate_existing_env_error, &stdout, &stderr) {
         return Ok(String::new());
     }
 
     Err(DonationProofError::Provider(if stderr.is_empty() {
-        sanitize_sui_error(&String::from_utf8_lossy(&output.stdout))
+        stdout
     } else {
         stderr
     }))
+}
+
+fn should_tolerate_existing_environment_error(enabled: bool, stdout: &str, stderr: &str) -> bool {
+    enabled && (is_existing_environment_error(stdout) || is_existing_environment_error(stderr))
 }
 
 fn is_existing_environment_error(output: &str) -> bool {
@@ -392,6 +397,21 @@ mod tests {
         assert!(super::is_existing_environment_error("Alias already exists"));
         assert!(!super::is_existing_environment_error(
             "environment config could not be written"
+        ));
+    }
+
+    #[test]
+    fn existing_environment_error_is_tolerated_on_stdout_or_stderr() {
+        let message = "Environment config with name [korede-backend] already exists.";
+
+        assert!(super::should_tolerate_existing_environment_error(
+            true, message, ""
+        ));
+        assert!(super::should_tolerate_existing_environment_error(
+            true, "", message
+        ));
+        assert!(!super::should_tolerate_existing_environment_error(
+            false, message, ""
         ));
     }
 
