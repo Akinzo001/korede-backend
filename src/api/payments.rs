@@ -12,9 +12,13 @@ use utoipa::ToSchema;
 use crate::{
     adapters::donation_proof_retry::next_retry_at,
     api::{error::ApiError, AppState},
-    domain::donation::{DonationMethod, DonationProofStatus, DonationStatus},
+    domain::{
+        donation::{DonationMethod, DonationProofStatus, DonationStatus},
+        medical_case::MedicalCase,
+    },
     port::{
         donation::{DonationFailureUpdate, DonationPaymentUpdate, NewDonation},
+        email::EmailMessage,
         payment::PaymentVerificationStatus,
         sui::DonationProofRequest,
     },
@@ -338,9 +342,9 @@ async fn finalize_checkout_donation(
         .update_donation_proof(proof_update)
         .await?;
 
-    maybe_close_case_dva(
+    handle_case_funding_completion(
         &state,
-        locked.medical_case.id,
+        &locked.medical_case,
         locked.remaining_amount_kobo - donation.amount_kobo,
     )
     .await?;
@@ -494,11 +498,230 @@ async fn finalize_dva_donation(
         public_case.medical_case.amount_raised_kobo,
         donation.amount_kobo,
     );
-    maybe_close_case_dva(&state, public_case.medical_case.id, remaining_amount_after).await?;
+    handle_case_funding_completion(&state, &public_case.medical_case, remaining_amount_after)
+        .await?;
 
     Ok(Json(PaystackWebhookResponse {
         status: "processed".to_owned(),
     }))
+}
+
+async fn handle_case_funding_completion(
+    state: &AppState,
+    medical_case: &MedicalCase,
+    remaining_amount_after: i64,
+) -> Result<(), ApiError> {
+    if remaining_amount_after <= 0 {
+        notify_patient_case_funded(state, medical_case).await;
+        notify_hospital_case_funded(state, medical_case).await;
+    }
+
+    maybe_close_case_dva(state, medical_case.id, remaining_amount_after).await
+}
+
+async fn notify_patient_case_funded(state: &AppState, medical_case: &MedicalCase) {
+    if let Err(error) = send_patient_case_funded_email(state, medical_case).await {
+        tracing::error!(
+            ?error,
+            medical_case_id = %medical_case.id,
+            patient_id = %medical_case.patient_id,
+            "failed to send patient funded-case email"
+        );
+    }
+}
+
+async fn notify_hospital_case_funded(state: &AppState, medical_case: &MedicalCase) {
+    if let Err(error) = send_hospital_case_funded_email(state, medical_case).await {
+        tracing::error!(
+            ?error,
+            medical_case_id = %medical_case.id,
+            hospital_id = %medical_case.hospital_id,
+            "failed to send hospital funded-case email"
+        );
+    }
+}
+
+async fn send_patient_case_funded_email(
+    state: &AppState,
+    medical_case: &MedicalCase,
+) -> Result<(), ApiError> {
+    let patient = state
+        .patient_repository
+        .find_patient_by_id(medical_case.patient_id)
+        .await?
+        .ok_or(crate::port::patient::PatientRepositoryError::NotFound)?;
+
+    let Some(patient_email) = patient
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+    else {
+        tracing::warn!(
+            medical_case_id = %medical_case.id,
+            patient_id = %medical_case.patient_id,
+            "cannot send funded-case email because patient has no email address"
+        );
+        return Ok(());
+    };
+
+    let message = patient_case_funded_email_message(
+        patient_email,
+        patient.full_name.trim(),
+        medical_case.title.trim(),
+        medical_case.bill_amount_kobo,
+        medical_case.public_slug.as_deref(),
+        &state.app_base_url,
+    );
+
+    state.email_service.send(message).await.map_err(|error| {
+        tracing::error!(
+            %error,
+            medical_case_id = %medical_case.id,
+            patient_id = %medical_case.patient_id,
+            "email provider failed to send funded-case email"
+        );
+        ApiError::Internal("failed to send patient funded-case email".to_owned())
+    })
+}
+
+async fn send_hospital_case_funded_email(
+    state: &AppState,
+    medical_case: &MedicalCase,
+) -> Result<(), ApiError> {
+    let hospital = state
+        .hospital_repository
+        .find_hospital_by_id(medical_case.hospital_id)
+        .await?
+        .ok_or(crate::port::hospital::HospitalRepositoryError::NotFound)?;
+
+    let recipient_name = hospital
+        .administrator_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| hospital.name.trim());
+    let message = hospital_case_funded_email_message(
+        hospital.email.trim(),
+        recipient_name,
+        hospital.name.trim(),
+        medical_case.title.trim(),
+        medical_case.bill_amount_kobo,
+        medical_case.public_slug.as_deref(),
+        &state.app_base_url,
+    );
+
+    state.email_service.send(message).await.map_err(|error| {
+        tracing::error!(
+            %error,
+            medical_case_id = %medical_case.id,
+            hospital_id = %medical_case.hospital_id,
+            "email provider failed to send hospital funded-case email"
+        );
+        ApiError::Internal("failed to send hospital funded-case email".to_owned())
+    })
+}
+
+fn patient_case_funded_email_message(
+    patient_email: &str,
+    patient_name: &str,
+    case_title: &str,
+    bill_amount_kobo: i64,
+    public_slug: Option<&str>,
+    app_base_url: &str,
+) -> EmailMessage {
+    let patient_name = if patient_name.is_empty() {
+        "there"
+    } else {
+        patient_name
+    };
+    let case_title = if case_title.is_empty() {
+        "your medical case"
+    } else {
+        case_title
+    };
+    let amount = format_ngn_amount(bill_amount_kobo);
+    let public_link = funded_case_public_link(app_base_url, public_slug);
+    let link_line = public_link
+        .as_ref()
+        .map(|link| format!("\nLink: {link}"))
+        .unwrap_or_default();
+    let html_link = public_link
+        .as_ref()
+        .map(|link| format!("<p><strong>Link:</strong> <a href=\"{link}\">{link}</a></p>"))
+        .unwrap_or_default();
+
+    EmailMessage {
+        to_email: patient_email.to_owned(),
+        to_name: Some(patient_name.to_owned()),
+        subject: "Your Korede Health medical case is fully funded".to_owned(),
+        text_body: format!(
+            "Hello {patient_name},\n\nGood news - donations for your medical case on Korede Health are now complete.\n\nCase: {case_title}\nAmount funded: {amount}{link_line}\n\nYour hospital will follow up with the next treatment steps.\n\nThank you,\nKorede Health"
+        ),
+        html_body: Some(format!(
+            "<p>Hello {patient_name},</p><p>Good news - donations for your medical case on Korede Health are now complete.</p><p><strong>Case:</strong> {case_title}</p><p><strong>Amount funded:</strong> {amount}</p>{html_link}<p>Your hospital will follow up with the next treatment steps.</p><p>Thank you,<br>Korede Health</p>"
+        )),
+    }
+}
+
+fn hospital_case_funded_email_message(
+    hospital_email: &str,
+    recipient_name: &str,
+    hospital_name: &str,
+    case_title: &str,
+    bill_amount_kobo: i64,
+    public_slug: Option<&str>,
+    app_base_url: &str,
+) -> EmailMessage {
+    let recipient_name = if recipient_name.is_empty() {
+        "there"
+    } else {
+        recipient_name
+    };
+    let hospital_name = if hospital_name.is_empty() {
+        "your hospital"
+    } else {
+        hospital_name
+    };
+    let case_title = if case_title.is_empty() {
+        "the medical case"
+    } else {
+        case_title
+    };
+    let amount = format_ngn_amount(bill_amount_kobo);
+    let public_link = funded_case_public_link(app_base_url, public_slug);
+    let link_line = public_link
+        .as_ref()
+        .map(|link| format!("\nLink: {link}"))
+        .unwrap_or_default();
+    let html_link = public_link
+        .as_ref()
+        .map(|link| format!("<p><strong>Link:</strong> <a href=\"{link}\">{link}</a></p>"))
+        .unwrap_or_default();
+
+    EmailMessage {
+        to_email: hospital_email.to_owned(),
+        to_name: Some(recipient_name.to_owned()),
+        subject: "A Korede Health medical case is fully funded".to_owned(),
+        text_body: format!(
+            "Hello {recipient_name},\n\nGood news - donations for {case_title} on Korede Health are now complete.\n\nHospital: {hospital_name}\nCase: {case_title}\nAmount funded: {amount}{link_line}\n\nPlease follow up with the patient and continue the treatment process.\n\nThank you,\nKorede Health"
+        ),
+        html_body: Some(format!(
+            "<p>Hello {recipient_name},</p><p>Good news - donations for {case_title} on Korede Health are now complete.</p><p><strong>Hospital:</strong> {hospital_name}</p><p><strong>Case:</strong> {case_title}</p><p><strong>Amount funded:</strong> {amount}</p>{html_link}<p>Please follow up with the patient and continue the treatment process.</p><p>Thank you,<br>Korede Health</p>"
+        )),
+    }
+}
+
+fn funded_case_public_link(app_base_url: &str, public_slug: Option<&str>) -> Option<String> {
+    let public_slug = public_slug?.trim();
+    if public_slug.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "{}/cases/{public_slug}",
+        app_base_url.trim_end_matches('/')
+    ))
 }
 
 async fn maybe_close_case_dva(
@@ -585,6 +808,34 @@ fn verification_message(status: &str) -> &'static str {
         }
         _ => "Payment verification completed.",
     }
+}
+
+fn format_ngn_amount(amount_kobo: i64) -> String {
+    let naira = amount_kobo / 100;
+    let kobo = amount_kobo.abs() % 100;
+    let mut digits = naira.abs().to_string();
+    let mut formatted = String::new();
+
+    while digits.len() > 3 {
+        let tail = digits.split_off(digits.len() - 3);
+        if formatted.is_empty() {
+            formatted = tail;
+        } else {
+            formatted = format!("{tail},{formatted}");
+        }
+    }
+
+    if formatted.is_empty() {
+        formatted = digits;
+    } else {
+        formatted = format!("{digits},{formatted}");
+    }
+
+    if amount_kobo < 0 {
+        formatted = format!("-{formatted}");
+    }
+
+    format!("NGN {formatted}.{kobo:02}")
 }
 
 fn validate_paystack_webhook_signature(
@@ -725,5 +976,69 @@ mod tests {
             Some(expires_at),
             expires_at + chrono::TimeDelta::seconds(1)
         ));
+    }
+
+    #[test]
+    fn funded_case_public_link_uses_app_base_url() {
+        assert_eq!(
+            funded_case_public_link(
+                "https://korede-health.akinzo.buzz/",
+                Some("andrew-sickness-e6fd7eb5")
+            ),
+            Some("https://korede-health.akinzo.buzz/cases/andrew-sickness-e6fd7eb5".to_owned())
+        );
+    }
+
+    #[test]
+    fn funded_case_email_mentions_patient_case_amount_and_link() {
+        let message = patient_case_funded_email_message(
+            "andrew@example.com",
+            "Andrew Andrew",
+            "Sickness",
+            500_000,
+            Some("andrew-sickness-e6fd7eb5"),
+            "https://korede-health.akinzo.buzz",
+        );
+
+        assert_eq!(message.to_email, "andrew@example.com");
+        assert_eq!(message.to_name, Some("Andrew Andrew".to_owned()));
+        assert!(message.subject.contains("fully funded"));
+        assert!(message.text_body.contains("Andrew Andrew"));
+        assert!(message.text_body.contains("Sickness"));
+        assert!(message.text_body.contains("NGN 5,000.00"));
+        assert!(message
+            .text_body
+            .contains("https://korede-health.akinzo.buzz/cases/andrew-sickness-e6fd7eb5"));
+        assert!(message
+            .html_body
+            .as_deref()
+            .is_some_and(|body| body.contains("now complete")));
+    }
+
+    #[test]
+    fn funded_case_email_mentions_hospital_case_amount_and_link() {
+        let message = hospital_case_funded_email_message(
+            "hospital@example.com",
+            "Dr Ada",
+            "Arike Clinic",
+            "Sickness",
+            500_000,
+            Some("andrew-sickness-e6fd7eb5"),
+            "https://korede-health.akinzo.buzz",
+        );
+
+        assert_eq!(message.to_email, "hospital@example.com");
+        assert_eq!(message.to_name, Some("Dr Ada".to_owned()));
+        assert!(message.subject.contains("fully funded"));
+        assert!(message.text_body.contains("Arike Clinic"));
+        assert!(message.text_body.contains("Sickness"));
+        assert!(message.text_body.contains("NGN 5,000.00"));
+        assert!(message
+            .text_body
+            .contains("https://korede-health.akinzo.buzz/cases/andrew-sickness-e6fd7eb5"));
+        assert!(message
+            .html_body
+            .as_deref()
+            .is_some_and(|body| body.contains("continue the treatment process")));
     }
 }
