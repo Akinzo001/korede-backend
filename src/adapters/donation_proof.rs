@@ -284,10 +284,7 @@ async fn run_sui_command(
     }
 
     let stderr = sanitize_sui_error(&String::from_utf8_lossy(&output.stderr));
-    if tolerate_existing_env_error
-        && (stderr.contains("Alias already exists")
-            || stderr.contains("environment config with this alias already exists"))
-    {
+    if tolerate_existing_env_error && is_existing_environment_error(&stderr) {
         return Ok(String::new());
     }
 
@@ -296,6 +293,12 @@ async fn run_sui_command(
     } else {
         stderr
     }))
+}
+
+fn is_existing_environment_error(output: &str) -> bool {
+    let normalized = output.to_ascii_lowercase();
+    normalized.contains("already exists")
+        && (normalized.contains("environment config") || normalized.contains("alias"))
 }
 
 fn sanitize_sui_error(output: &str) -> String {
@@ -376,6 +379,20 @@ mod tests {
         assert!(!output.contains("alpha beta gamma"));
         assert!(output.contains("[REDACTED]"));
         assert!(output.contains("DNS error"));
+    }
+
+    #[test]
+    fn existing_environment_errors_are_tolerated_across_sui_cli_wording() {
+        assert!(super::is_existing_environment_error(
+            "Environment config with name [korede-backend] already exists."
+        ));
+        assert!(super::is_existing_environment_error(
+            "environment config with this alias already exists"
+        ));
+        assert!(super::is_existing_environment_error("Alias already exists"));
+        assert!(!super::is_existing_environment_error(
+            "environment config could not be written"
+        ));
     }
 
     #[test]
