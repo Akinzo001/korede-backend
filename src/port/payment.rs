@@ -78,6 +78,59 @@ pub struct PaymentVerification {
     pub paid_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TransferRecipientRequest {
+    pub name: String,
+    pub account_number: String,
+    pub bank_code: String,
+    pub currency: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransferRecipient {
+    pub recipient_code: String,
+    pub provider_id: Option<i64>,
+    pub account_name: Option<String>,
+    pub bank_name: Option<String>,
+    pub bank_code: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransferInitiationRequest {
+    pub amount_kobo: i64,
+    pub recipient_code: String,
+    pub reference: String,
+    pub reason: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferStatus {
+    Pending,
+    Success,
+    Failed,
+    OtpRequired,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransferInitiation {
+    pub transfer_code: Option<String>,
+    pub provider_id: Option<i64>,
+    pub status: TransferStatus,
+    pub provider_status: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransferVerification {
+    pub transfer_code: Option<String>,
+    pub provider_id: Option<i64>,
+    pub status: TransferStatus,
+    pub provider_status: Option<String>,
+    pub failure_reason: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum PaymentGatewayError {
     #[error("missing payment configuration: {0}")]
@@ -108,6 +161,21 @@ pub trait PaymentGateway: Send + Sync {
         &self,
         reference: &str,
     ) -> Result<PaymentVerification, PaymentGatewayError>;
+
+    async fn create_transfer_recipient(
+        &self,
+        request: TransferRecipientRequest,
+    ) -> Result<TransferRecipient, PaymentGatewayError>;
+
+    async fn initiate_transfer(
+        &self,
+        request: TransferInitiationRequest,
+    ) -> Result<TransferInitiation, PaymentGatewayError>;
+
+    async fn verify_transfer(
+        &self,
+        reference: &str,
+    ) -> Result<TransferVerification, PaymentGatewayError>;
 
     fn generate_reference(&self) -> String;
 }

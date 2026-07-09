@@ -10,12 +10,13 @@ use uuid::Uuid;
 
 use crate::{
     adapters::donation_proof_retry::next_retry_at,
-    api::{error::ApiError, AppState},
+    api::{error::ApiError, payments::process_hospital_settlement_for_case, AppState},
     domain::{
         donation::{Donation, DonationProofStatus, DonationStatus},
         hospital::{Hospital, HospitalVerificationStatus},
         hospital_document::{HospitalDocument, HospitalDocumentStatus, HospitalDocumentType},
         patient_declaration::PatientDeclaration,
+        settlement::{HospitalSettlement, HospitalSettlementStatus},
     },
     port::{
         auth::AuthenticatedAdmin,
@@ -25,6 +26,7 @@ use crate::{
         },
         email::EmailMessage,
         hospital::{HospitalDocumentReview, HospitalRepositoryError},
+        settlement::{AdminSettlementListQuery, AdminSettlementOperation},
         sui::{DonationProofError, DonationProofReceipt, DonationProofRequest},
     },
 };
@@ -38,6 +40,12 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/donations/:donation_id/proof/retry",
             post(retry_donation_proof),
+        )
+        .route("/settlements", get(list_admin_settlements))
+        .route("/settlements/:settlement_id", get(get_admin_settlement))
+        .route(
+            "/settlements/:settlement_id/retry",
+            post(retry_admin_settlement),
         )
         .route("/hospitals", get(list_hospitals))
         .route("/hospitals/:hospital_id", get(get_hospital))
@@ -83,6 +91,7 @@ pub struct AdminHospitalResponse {
     pub medical_license_number: Option<String>,
     pub corporate_account_name: String,
     pub corporate_account_number: String,
+    pub corporate_bank_code: Option<String>,
     pub bank_name: String,
     pub verification_status: HospitalVerificationStatus,
     pub created_at: DateTime<Utc>,
@@ -228,6 +237,56 @@ pub struct AdminDonationProofRetryResponse {
     pub proof_next_retry_at: Option<DateTime<Utc>>,
     pub proof_last_error: Option<String>,
     pub proof_published_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct AdminSettlementListParams {
+    pub status: Option<String>,
+    pub hospital_id: Option<Uuid>,
+    pub medical_case_id: Option<Uuid>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminSettlementsResponse {
+    pub settlements: Vec<AdminSettlementResponse>,
+    pub pagination: AdminPaginationResponse,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminSettlementResponse {
+    pub id: Uuid,
+    pub hospital_id: Uuid,
+    pub hospital_name: String,
+    pub medical_case_id: Uuid,
+    pub case_title: String,
+    pub public_slug: Option<String>,
+    pub patient_id: Uuid,
+    pub patient_name: String,
+    pub amount_kobo: i64,
+    pub status: String,
+    pub settlement_reference: String,
+    pub bank_name: String,
+    pub bank_code: Option<String>,
+    pub account_name: String,
+    pub account_number: String,
+    pub paystack_recipient_code: Option<String>,
+    pub paystack_transfer_code: Option<String>,
+    pub paystack_transfer_id: Option<i64>,
+    pub paystack_status: Option<String>,
+    pub failure_reason: Option<String>,
+    pub initiated_at: Option<DateTime<Utc>>,
+    pub paid_at: Option<DateTime<Utc>>,
+    pub failed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminSettlementRetryResponse {
+    pub message: String,
+    pub settlement: AdminSettlementResponse,
 }
 
 pub async fn login_admin(
@@ -392,6 +451,120 @@ pub async fn retry_donation_proof(
     Ok(Json(AdminDonationProofRetryResponse::from_parts(
         message, donation,
     )))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/settlements",
+    tag = "Admin",
+    security(("bearer_auth" = [])),
+    params(AdminSettlementListParams),
+    responses(
+        (status = 200, description = "Hospital settlement operations list.", body = AdminSettlementsResponse),
+        (status = 400, description = "Invalid settlement filter."),
+        (status = 401, description = "Missing or invalid admin bearer token.")
+    )
+)]
+pub async fn list_admin_settlements(
+    _admin: AuthenticatedAdmin,
+    State(state): State<AppState>,
+    Query(params): Query<AdminSettlementListParams>,
+) -> Result<Json<AdminSettlementsResponse>, ApiError> {
+    let query = admin_settlement_list_query(params)?;
+    let total = state
+        .settlement_repository
+        .count_admin_settlements(query.clone())
+        .await?;
+    let settlements = state
+        .settlement_repository
+        .list_admin_settlements(query.clone())
+        .await?
+        .into_iter()
+        .map(AdminSettlementResponse::from)
+        .collect();
+
+    Ok(Json(AdminSettlementsResponse {
+        settlements,
+        pagination: AdminPaginationResponse {
+            limit: query.limit,
+            offset: query.offset,
+            total,
+        },
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/settlements/{settlement_id}",
+    tag = "Admin",
+    security(("bearer_auth" = [])),
+    params(
+        ("settlement_id" = Uuid, Path, description = "Hospital settlement ID")
+    ),
+    responses(
+        (status = 200, description = "Hospital settlement operation detail.", body = AdminSettlementResponse),
+        (status = 401, description = "Missing or invalid admin bearer token."),
+        (status = 404, description = "Hospital settlement not found.")
+    )
+)]
+pub async fn get_admin_settlement(
+    _admin: AuthenticatedAdmin,
+    State(state): State<AppState>,
+    Path(settlement_id): Path<Uuid>,
+) -> Result<Json<AdminSettlementResponse>, ApiError> {
+    let settlement = state
+        .settlement_repository
+        .get_admin_settlement(settlement_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("hospital settlement not found".to_owned()))?;
+
+    Ok(Json(AdminSettlementResponse::from(settlement)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/settlements/{settlement_id}/retry",
+    tag = "Admin",
+    security(("bearer_auth" = [])),
+    params(
+        ("settlement_id" = Uuid, Path, description = "Hospital settlement ID")
+    ),
+    responses(
+        (status = 200, description = "Hospital settlement retry result.", body = AdminSettlementRetryResponse),
+        (status = 401, description = "Missing or invalid admin bearer token."),
+        (status = 404, description = "Hospital settlement not found."),
+        (status = 409, description = "Hospital settlement is not retryable.")
+    )
+)]
+pub async fn retry_admin_settlement(
+    _admin: AuthenticatedAdmin,
+    State(state): State<AppState>,
+    Path(settlement_id): Path<Uuid>,
+) -> Result<Json<AdminSettlementRetryResponse>, ApiError> {
+    let settlement = state
+        .settlement_repository
+        .get_settlement(settlement_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("hospital settlement not found".to_owned()))?;
+    validate_settlement_retry_target(&settlement)?;
+
+    let medical_case = state
+        .medical_case_repository
+        .find_case_by_id(settlement.medical_case_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("medical case not found".to_owned()))?;
+
+    let updated = process_hospital_settlement_for_case(&state, &medical_case).await?;
+    let operation = state
+        .settlement_repository
+        .get_admin_settlement(updated.id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("hospital settlement not found".to_owned()))?;
+
+    Ok(Json(AdminSettlementRetryResponse {
+        message: settlement_retry_message(&updated.status).to_owned(),
+        settlement: AdminSettlementResponse::from(operation),
+    }))
 }
 
 #[utoipa::path(
@@ -582,6 +755,18 @@ fn admin_donation_list_query(
             from: params.from,
             to: params.to,
         },
+        limit: normalize_limit(params.limit)?,
+        offset: normalize_offset(params.offset)?,
+    })
+}
+
+fn admin_settlement_list_query(
+    params: AdminSettlementListParams,
+) -> Result<AdminSettlementListQuery, ApiError> {
+    Ok(AdminSettlementListQuery {
+        status: parse_optional_settlement_status(params.status.as_deref())?,
+        hospital_id: params.hospital_id,
+        medical_case_id: params.medical_case_id,
         limit: normalize_limit(params.limit)?,
         offset: normalize_offset(params.offset)?,
     })
@@ -883,6 +1068,62 @@ fn normalize_offset(offset: Option<i64>) -> Result<i64, ApiError> {
     }
 }
 
+fn parse_optional_settlement_status(
+    value: Option<&str>,
+) -> Result<Option<HospitalSettlementStatus>, ApiError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let status = match value {
+        "pending" => HospitalSettlementStatus::Pending,
+        "recipient_created" => HospitalSettlementStatus::RecipientCreated,
+        "processing" => HospitalSettlementStatus::Processing,
+        "otp_required" => HospitalSettlementStatus::OtpRequired,
+        "paid" => HospitalSettlementStatus::Paid,
+        "failed" => HospitalSettlementStatus::Failed,
+        "reversed" => HospitalSettlementStatus::Reversed,
+        "failed_config" => HospitalSettlementStatus::FailedConfig,
+        "bank_details_required" => HospitalSettlementStatus::BankDetailsRequired,
+        _ => {
+            return Err(ApiError::BadRequest(
+                "invalid settlement status filter".to_owned(),
+            ))
+        }
+    };
+
+    Ok(Some(status))
+}
+
+fn validate_settlement_retry_target(settlement: &HospitalSettlement) -> Result<(), ApiError> {
+    if settlement.status == HospitalSettlementStatus::Paid {
+        return Err(ApiError::Conflict(
+            "hospital settlement is already paid".to_owned(),
+        ));
+    }
+
+    if !settlement.status.can_retry() {
+        return Err(ApiError::Conflict(
+            "hospital settlement is not retryable right now".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn settlement_retry_message(status: &HospitalSettlementStatus) -> &'static str {
+    match status {
+        HospitalSettlementStatus::Paid => "paid",
+        HospitalSettlementStatus::Processing => "processing",
+        HospitalSettlementStatus::OtpRequired => "otp_required",
+        HospitalSettlementStatus::FailedConfig => "failed_config",
+        HospitalSettlementStatus::BankDetailsRequired => "bank_details_required",
+        HospitalSettlementStatus::Failed => "failed",
+        HospitalSettlementStatus::Reversed => "reversed",
+        HospitalSettlementStatus::Pending | HospitalSettlementStatus::RecipientCreated => "pending",
+    }
+}
+
 fn validate_manual_retry_target(donation: &Donation) -> Result<(), ApiError> {
     if donation.status != DonationStatus::Paid {
         return Err(ApiError::Conflict(
@@ -990,6 +1231,7 @@ impl From<Hospital> for AdminHospitalResponse {
             medical_license_number: hospital.medical_license_number,
             corporate_account_name: hospital.corporate_account_name,
             corporate_account_number: hospital.corporate_account_number,
+            corporate_bank_code: hospital.corporate_bank_code,
             bank_name: hospital.bank_name,
             verification_status: hospital.verification_status,
             created_at: hospital.created_at,
@@ -1103,6 +1345,39 @@ impl From<AdminDonationOperation> for AdminDonationDetailResponse {
             amount_raised_kobo,
             remaining_amount_kobo,
             case_status,
+        }
+    }
+}
+
+impl From<AdminSettlementOperation> for AdminSettlementResponse {
+    fn from(operation: AdminSettlementOperation) -> Self {
+        let settlement = operation.settlement;
+        Self {
+            id: settlement.id,
+            hospital_id: settlement.hospital_id,
+            hospital_name: operation.hospital_name,
+            medical_case_id: settlement.medical_case_id,
+            case_title: operation.case_title,
+            public_slug: operation.public_slug,
+            patient_id: operation.patient_id,
+            patient_name: operation.patient_name,
+            amount_kobo: settlement.amount_kobo,
+            status: settlement.status.as_str().to_owned(),
+            settlement_reference: settlement.settlement_reference,
+            bank_name: settlement.bank_name,
+            bank_code: settlement.bank_code,
+            account_name: settlement.account_name,
+            account_number: settlement.account_number,
+            paystack_recipient_code: settlement.paystack_recipient_code,
+            paystack_transfer_code: settlement.paystack_transfer_code,
+            paystack_transfer_id: settlement.paystack_transfer_id,
+            paystack_status: settlement.paystack_status,
+            failure_reason: settlement.failure_reason,
+            initiated_at: settlement.initiated_at,
+            paid_at: settlement.paid_at,
+            failed_at: settlement.failed_at,
+            created_at: settlement.created_at,
+            updated_at: settlement.updated_at,
         }
     }
 }
@@ -1549,6 +1824,7 @@ mod tests {
             medical_license_number: Some("ML123".to_owned()),
             corporate_account_name: "Lagoon Hospital".to_owned(),
             corporate_account_number: "0123456789".to_owned(),
+            corporate_bank_code: Some("035".to_owned()),
             bank_name: "Wema Bank".to_owned(),
             verification_status: HospitalVerificationStatus::Pending,
             created_at: now,

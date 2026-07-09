@@ -69,6 +69,7 @@ pub struct RegisterHospitalRequest {
     pub medical_license_number: Option<String>,
     pub corporate_account_name: String,
     pub corporate_account_number: String,
+    pub corporate_bank_code: Option<String>,
     pub bank_name: String,
     pub terms_accepted: bool,
     pub cac_document: Base64DocumentRequest,
@@ -132,6 +133,7 @@ pub struct HospitalResponse {
     pub medical_license_number: Option<String>,
     pub corporate_account_name: String,
     pub corporate_account_number: String,
+    pub corporate_bank_code: Option<String>,
     pub bank_name: String,
     pub verification_status: HospitalVerificationStatus,
     pub created_at: DateTime<Utc>,
@@ -403,6 +405,12 @@ pub async fn register_hospital(
                 .map(|value| value.trim().to_owned()),
             corporate_account_name: request.corporate_account_name.trim().to_owned(),
             corporate_account_number: request.corporate_account_number.trim().to_owned(),
+            corporate_bank_code: request
+                .corporate_bank_code
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
             bank_name: request.bank_name.trim().to_owned(),
         })
         .await?;
@@ -1397,6 +1405,16 @@ fn validate_registration(request: &RegisterHospitalRequest) -> Result<(), ApiErr
         return Err(ApiError::BadRequest("email is invalid".to_owned()));
     }
 
+    if request
+        .corporate_bank_code
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(ApiError::BadRequest(
+            "corporate_bank_code cannot be blank when provided".to_owned(),
+        ));
+    }
+
     if request.password.len() < 12 {
         return Err(ApiError::BadRequest(
             "password must be at least 12 characters".to_owned(),
@@ -1716,6 +1734,7 @@ impl From<Hospital> for HospitalResponse {
             medical_license_number: hospital.medical_license_number,
             corporate_account_name: hospital.corporate_account_name,
             corporate_account_number: hospital.corporate_account_number,
+            corporate_bank_code: hospital.corporate_bank_code,
             bank_name: hospital.bank_name,
             verification_status: hospital.verification_status,
             created_at: hospital.created_at,
@@ -1928,6 +1947,7 @@ mod tests {
             medical_license_number: Some("ML123456".to_owned()),
             corporate_account_name: "Lagoon Hospital Ltd".to_owned(),
             corporate_account_number: "0123456789".to_owned(),
+            corporate_bank_code: Some("035".to_owned()),
             bank_name: "Wema Bank".to_owned(),
             verification_status: status,
             created_at: Utc::now(),
@@ -1975,6 +1995,7 @@ mod tests {
             medical_license_number: Some("ML123456".to_owned()),
             corporate_account_name: "Lagoon Hospital Ltd".to_owned(),
             corporate_account_number: "0123456789".to_owned(),
+            corporate_bank_code: Some("035".to_owned()),
             bank_name: "Wema Bank".to_owned(),
             terms_accepted: true,
             cac_document: Base64DocumentRequest {

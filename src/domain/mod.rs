@@ -42,3 +42,6 @@ pub mod patient_password_reset_otp;
 
 // Stored refresh-token session model.
 pub mod refresh_token;
+
+// Hospital payout/settlement lifecycle.
+pub mod settlement;

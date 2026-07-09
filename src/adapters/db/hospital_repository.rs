@@ -55,6 +55,7 @@ impl HospitalRepository for PostgresHospitalRepository {
                 medical_license_number,
                 corporate_account_name,
                 corporate_account_number,
+                corporate_bank_code,
                 bank_name,
                 verification_status,
                 created_at,
@@ -75,6 +76,7 @@ impl HospitalRepository for PostgresHospitalRepository {
                 $10,
                 $11,
                 $12,
+                $13,
                 'pending',
                 NOW(),
                 NOW()
@@ -93,6 +95,7 @@ impl HospitalRepository for PostgresHospitalRepository {
                 medical_license_number,
                 corporate_account_name,
                 corporate_account_number,
+                corporate_bank_code,
                 bank_name,
                 verification_status,
                 created_at,
@@ -110,6 +113,7 @@ impl HospitalRepository for PostgresHospitalRepository {
         .bind(hospital.medical_license_number)
         .bind(hospital.corporate_account_name)
         .bind(hospital.corporate_account_number)
+        .bind(hospital.corporate_bank_code)
         .bind(hospital.bank_name)
         .fetch_one(&self.pool)
         .await;
@@ -143,6 +147,7 @@ impl HospitalRepository for PostgresHospitalRepository {
                 medical_license_number,
                 corporate_account_name,
                 corporate_account_number,
+                corporate_bank_code,
                 bank_name,
                 verification_status,
                 created_at,
@@ -180,6 +185,7 @@ impl HospitalRepository for PostgresHospitalRepository {
                 medical_license_number,
                 corporate_account_name,
                 corporate_account_number,
+                corporate_bank_code,
                 bank_name,
                 verification_status,
                 created_at,
@@ -214,6 +220,7 @@ impl HospitalRepository for PostgresHospitalRepository {
                 medical_license_number,
                 corporate_account_name,
                 corporate_account_number,
+                corporate_bank_code,
                 bank_name,
                 verification_status,
                 created_at,
@@ -383,6 +390,7 @@ impl HospitalRepository for PostgresHospitalRepository {
                 medical_license_number,
                 corporate_account_name,
                 corporate_account_number,
+                corporate_bank_code,
                 bank_name,
                 verification_status,
                 created_at,
@@ -530,6 +538,7 @@ impl HospitalRepository for PostgresHospitalRepository {
                 medical_license_number,
                 corporate_account_name,
                 corporate_account_number,
+                corporate_bank_code,
                 bank_name,
                 verification_status,
                 created_at,
@@ -922,6 +931,7 @@ fn hospital_from_row(row: &sqlx::postgres::PgRow) -> Result<Hospital, sqlx::Erro
         medical_license_number: row.try_get("medical_license_number")?,
         corporate_account_name: row.try_get("corporate_account_name")?,
         corporate_account_number: row.try_get("corporate_account_number")?,
+        corporate_bank_code: row.try_get("corporate_bank_code")?,
         bank_name: row.try_get("bank_name")?,
         verification_status: verification_status_from_str(row.try_get("verification_status")?),
         created_at: row.try_get("created_at")?,

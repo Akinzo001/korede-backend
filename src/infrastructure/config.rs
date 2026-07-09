@@ -102,6 +102,9 @@ pub struct PaymentConfig {
     pub paystack_webhook_secret: Option<String>,
     pub paystack_dva_preferred_bank: String,
     pub paystack_dva_country: String,
+    pub paystack_transfers_enabled: bool,
+    pub paystack_transfer_currency: String,
+    pub paystack_transfer_source: String,
     pub flutterwave_secret_key: Option<String>,
 }
 
@@ -182,6 +185,11 @@ impl AppConfig {
                     .unwrap_or_else(|| "test-bank".to_owned()),
                 paystack_dva_country: optional_env("PAYSTACK_DVA_COUNTRY")
                     .unwrap_or_else(|| "NG".to_owned()),
+                paystack_transfers_enabled: parse_bool_env("PAYSTACK_TRANSFERS_ENABLED", false)?,
+                paystack_transfer_currency: optional_env("PAYSTACK_TRANSFER_CURRENCY")
+                    .unwrap_or_else(|| "NGN".to_owned()),
+                paystack_transfer_source: optional_env("PAYSTACK_TRANSFER_SOURCE")
+                    .unwrap_or_else(|| "balance".to_owned()),
                 flutterwave_secret_key: optional_env("FLUTTERWAVE_SECRET_KEY"),
             },
             storage: {
@@ -270,4 +278,16 @@ fn parse_usize_env(key: &'static str, default: &'static str) -> Result<usize, Co
     value
         .parse()
         .map_err(|_| ConfigError::InvalidNumber { key, value })
+}
+
+fn parse_bool_env(key: &'static str, default: bool) -> Result<bool, ConfigError> {
+    let Some(value) = optional_env(key) else {
+        return Ok(default);
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(ConfigError::InvalidNumber { key, value }),
+    }
 }

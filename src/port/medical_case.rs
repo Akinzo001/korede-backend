@@ -95,6 +95,11 @@ pub trait MedicalCaseRepository: Send + Sync {
         public_slug: &str,
     ) -> Result<Option<MedicalCase>, MedicalCaseRepositoryError>;
 
+    async fn find_case_by_id(
+        &self,
+        medical_case_id: Uuid,
+    ) -> Result<Option<MedicalCase>, MedicalCaseRepositoryError>;
+
     async fn patient_has_open_case(
         &self,
         patient_id: Uuid,

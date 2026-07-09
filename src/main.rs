@@ -17,6 +17,7 @@ use korede_backend::{
             patient_repository::PostgresPatientRepository,
             postgres::{connect, run_migrations},
             refresh_token_repository::PostgresRefreshTokenRepository,
+            settlement_repository::PostgresHospitalSettlementRepository,
         },
         donation_proof::{DisabledDonationProofPublisher, SuiDonationProofPublisher},
         donation_proof_retry::run_donation_proof_retry_worker,
@@ -43,6 +44,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let patient_declaration_repository =
         Arc::new(PostgresPatientDeclarationRepository::new(db_pool.clone()));
     let refresh_token_repository = Arc::new(PostgresRefreshTokenRepository::new(db_pool.clone()));
+    let settlement_repository =
+        Arc::new(PostgresHospitalSettlementRepository::new(db_pool.clone()));
     let password_hasher = Arc::new(Argon2PasswordHasher);
     let token_service = Arc::new(JwtTokenService::new(
         config.auth.jwt_secret.clone(),
@@ -105,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         patient_repository,
         patient_declaration_repository,
         refresh_token_repository,
+        settlement_repository,
         password_hasher,
         token_service,
         payment_gateway,
@@ -119,6 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app_base_url: config.payments.base_url.clone(),
         app_name: config.payments.app_name.clone(),
         paystack_webhook_secret: config.payments.paystack_webhook_secret.clone(),
+        paystack_transfers_enabled: config.payments.paystack_transfers_enabled,
+        paystack_transfer_currency: config.payments.paystack_transfer_currency.clone(),
+        paystack_transfer_source: config.payments.paystack_transfer_source.clone(),
         sui_network: config.sui.network.clone(),
     };
 

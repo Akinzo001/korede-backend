@@ -22,6 +22,7 @@ pub struct NewHospital {
     pub medical_license_number: Option<String>,
     pub corporate_account_name: String,
     pub corporate_account_number: String,
+    pub corporate_bank_code: Option<String>,
     pub bank_name: String,
 }
 

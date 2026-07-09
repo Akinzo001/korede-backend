@@ -90,6 +90,9 @@ pub struct Hospital {
     // Account number for direct hospital settlement.
     pub corporate_account_number: String,
 
+    // Paystack/NIBSS bank code for direct hospital settlement.
+    pub corporate_bank_code: Option<String>,
+
     // Bank name for direct hospital settlement.
     pub bank_name: String,
 

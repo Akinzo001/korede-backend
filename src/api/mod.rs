@@ -42,6 +42,7 @@ use crate::port::{
     patient_declaration::PatientDeclarationRepository,
     payment::PaymentGateway,
     refresh_token::RefreshTokenRepository,
+    settlement::HospitalSettlementRepository,
     storage::DocumentStorage,
     sui::DonationProofPublisher,
 };
@@ -62,6 +63,7 @@ pub struct AppState {
     pub patient_repository: Arc<dyn PatientRepository>,
     pub patient_declaration_repository: Arc<dyn PatientDeclarationRepository>,
     pub refresh_token_repository: Arc<dyn RefreshTokenRepository>,
+    pub settlement_repository: Arc<dyn HospitalSettlementRepository>,
     pub password_hasher: Arc<dyn PasswordHasher>,
     pub token_service: Arc<dyn TokenService>,
     pub payment_gateway: Arc<dyn PaymentGateway>,
@@ -76,6 +78,9 @@ pub struct AppState {
     pub app_base_url: String,
     pub app_name: String,
     pub paystack_webhook_secret: Option<String>,
+    pub paystack_transfers_enabled: bool,
+    pub paystack_transfer_currency: String,
+    pub paystack_transfer_source: String,
     pub sui_network: String,
 }
 

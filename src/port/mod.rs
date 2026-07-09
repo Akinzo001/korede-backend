@@ -7,5 +7,6 @@ pub mod patient;
 pub mod patient_declaration;
 pub mod payment;
 pub mod refresh_token;
+pub mod settlement;
 pub mod storage;
 pub mod sui;

@@ -14,12 +14,21 @@ use crate::{
     api::{error::ApiError, AppState},
     domain::{
         donation::{DonationMethod, DonationProofStatus, DonationStatus},
+        hospital::Hospital,
         medical_case::MedicalCase,
+        settlement::{HospitalSettlement, HospitalSettlementStatus},
     },
     port::{
         donation::{DonationFailureUpdate, DonationPaymentUpdate, NewDonation},
         email::EmailMessage,
-        payment::PaymentVerificationStatus,
+        payment::{
+            PaymentGatewayError, PaymentVerificationStatus, TransferInitiationRequest,
+            TransferRecipientRequest, TransferStatus,
+        },
+        settlement::{
+            NewHospitalSettlement, SettlementRecipientUpdate, SettlementStatusUpdate,
+            SettlementTransferUpdate,
+        },
         sui::DonationProofRequest,
     },
 };
@@ -58,6 +67,10 @@ struct PaystackWebhookEnvelope {
 #[derive(Debug, Deserialize)]
 struct PaystackWebhookData {
     reference: Option<String>,
+    transfer_code: Option<String>,
+    id: Option<i64>,
+    status: Option<String>,
+    failure_reason: Option<String>,
     dedicated_account: Option<PaystackWebhookDedicatedAccount>,
 }
 
@@ -86,6 +99,10 @@ pub async fn handle_paystack_webhook(
 
     let payload: PaystackWebhookEnvelope = serde_json::from_slice(&body)
         .map_err(|_| ApiError::BadRequest("invalid webhook payload".to_owned()))?;
+
+    if payload.event.starts_with("transfer.") {
+        return finalize_transfer_webhook(state, &payload.event, payload.data).await;
+    }
 
     if payload.event != "charge.success" {
         return Ok(Json(PaystackWebhookResponse {
@@ -512,11 +529,360 @@ async fn handle_case_funding_completion(
     remaining_amount_after: i64,
 ) -> Result<(), ApiError> {
     if remaining_amount_after <= 0 {
+        trigger_hospital_settlement(state, medical_case).await;
         notify_patient_case_funded(state, medical_case).await;
         notify_hospital_case_funded(state, medical_case).await;
     }
 
     maybe_close_case_dva(state, medical_case.id, remaining_amount_after).await
+}
+
+async fn trigger_hospital_settlement(state: &AppState, medical_case: &MedicalCase) {
+    match process_hospital_settlement_for_case(state, medical_case).await {
+        Ok(settlement) => {
+            tracing::info!(
+                medical_case_id = %medical_case.id,
+                hospital_id = %medical_case.hospital_id,
+                settlement_id = %settlement.id,
+                settlement_status = settlement.status.as_str(),
+                "hospital settlement processed after case funding completion"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                medical_case_id = %medical_case.id,
+                hospital_id = %medical_case.hospital_id,
+                "failed to process hospital settlement after case funding completion"
+            );
+        }
+    }
+}
+
+pub async fn process_hospital_settlement_for_case(
+    state: &AppState,
+    medical_case: &MedicalCase,
+) -> Result<HospitalSettlement, ApiError> {
+    let hospital = state
+        .hospital_repository
+        .find_hospital_by_id(medical_case.hospital_id)
+        .await?
+        .ok_or(crate::port::hospital::HospitalRepositoryError::NotFound)?;
+
+    let settlement = state
+        .settlement_repository
+        .create_or_get_settlement(new_hospital_settlement(&hospital, medical_case))
+        .await?;
+
+    if !settlement.status.can_retry() {
+        return Ok(settlement);
+    }
+
+    if !state.paystack_transfers_enabled {
+        return state
+            .settlement_repository
+            .update_status(SettlementStatusUpdate {
+                settlement_id: settlement.id,
+                status: HospitalSettlementStatus::FailedConfig,
+                paystack_status: None,
+                failure_reason: Some("Paystack transfers are disabled".to_owned()),
+            })
+            .await
+            .map_err(ApiError::from);
+    }
+
+    let Some(bank_code) = hospital_bank_code(&hospital) else {
+        return state
+            .settlement_repository
+            .update_status(SettlementStatusUpdate {
+                settlement_id: settlement.id,
+                status: HospitalSettlementStatus::BankDetailsRequired,
+                paystack_status: None,
+                failure_reason: Some("hospital corporate_bank_code is required".to_owned()),
+            })
+            .await
+            .map_err(ApiError::from);
+    };
+
+    if hospital.corporate_account_name.trim().is_empty()
+        || hospital.corporate_account_number.trim().is_empty()
+    {
+        return state
+            .settlement_repository
+            .update_status(SettlementStatusUpdate {
+                settlement_id: settlement.id,
+                status: HospitalSettlementStatus::BankDetailsRequired,
+                paystack_status: None,
+                failure_reason: Some(
+                    "hospital corporate account name and number are required".to_owned(),
+                ),
+            })
+            .await
+            .map_err(ApiError::from);
+    }
+
+    let settlement = if settlement.paystack_recipient_code.is_none() {
+        match state
+            .payment_gateway
+            .create_transfer_recipient(TransferRecipientRequest {
+                name: hospital.corporate_account_name.trim().to_owned(),
+                account_number: hospital.corporate_account_number.trim().to_owned(),
+                bank_code,
+                currency: state.paystack_transfer_currency.clone(),
+                description: format!("Korede settlement for case {}", medical_case.id),
+            })
+            .await
+        {
+            Ok(recipient) => {
+                let _ = (
+                    recipient.provider_id,
+                    recipient.account_name,
+                    recipient.bank_name,
+                    recipient.bank_code,
+                );
+                state
+                    .settlement_repository
+                    .update_recipient(SettlementRecipientUpdate {
+                        settlement_id: settlement.id,
+                        status: HospitalSettlementStatus::RecipientCreated,
+                        paystack_recipient_code: recipient.recipient_code,
+                        paystack_status: Some("recipient_created".to_owned()),
+                    })
+                    .await?
+            }
+            Err(error) => {
+                return settlement_gateway_failure_update(
+                    state,
+                    settlement.id,
+                    transfer_failure_status(&error),
+                    error.to_string(),
+                )
+                .await;
+            }
+        }
+    } else {
+        settlement
+    };
+
+    let Some(recipient_code) = settlement.paystack_recipient_code.clone() else {
+        return state
+            .settlement_repository
+            .update_status(SettlementStatusUpdate {
+                settlement_id: settlement.id,
+                status: HospitalSettlementStatus::Failed,
+                paystack_status: None,
+                failure_reason: Some("Paystack recipient code is missing".to_owned()),
+            })
+            .await
+            .map_err(ApiError::from);
+    };
+
+    match state
+        .payment_gateway
+        .initiate_transfer(TransferInitiationRequest {
+            amount_kobo: settlement.amount_kobo,
+            recipient_code,
+            reference: settlement.settlement_reference.clone(),
+            reason: format!("Korede Health payout for {}", medical_case.title.trim()),
+            source: state.paystack_transfer_source.clone(),
+        })
+        .await
+    {
+        Ok(transfer) => {
+            let status = settlement_status_from_transfer_status(&transfer.status);
+            state
+                .settlement_repository
+                .update_transfer(SettlementTransferUpdate {
+                    settlement_id: settlement.id,
+                    status,
+                    paystack_transfer_code: transfer.transfer_code,
+                    paystack_transfer_id: transfer.provider_id,
+                    paystack_status: transfer.provider_status,
+                    failure_reason: transfer.message,
+                })
+                .await
+                .map_err(ApiError::from)
+        }
+        Err(error) => {
+            settlement_gateway_failure_update(
+                state,
+                settlement.id,
+                transfer_failure_status(&error),
+                error.to_string(),
+            )
+            .await
+        }
+    }
+}
+
+async fn settlement_gateway_failure_update(
+    state: &AppState,
+    settlement_id: uuid::Uuid,
+    status: HospitalSettlementStatus,
+    failure_reason: String,
+) -> Result<HospitalSettlement, ApiError> {
+    state
+        .settlement_repository
+        .update_status(SettlementStatusUpdate {
+            settlement_id,
+            status,
+            paystack_status: None,
+            failure_reason: Some(failure_reason),
+        })
+        .await
+        .map_err(ApiError::from)
+}
+
+fn new_hospital_settlement(
+    hospital: &Hospital,
+    medical_case: &MedicalCase,
+) -> NewHospitalSettlement {
+    NewHospitalSettlement {
+        hospital_id: hospital.id,
+        medical_case_id: medical_case.id,
+        amount_kobo: medical_case.bill_amount_kobo,
+        status: HospitalSettlementStatus::Pending,
+        settlement_reference: settlement_reference_for_case(medical_case.id),
+        bank_name: hospital.bank_name.trim().to_owned(),
+        bank_code: hospital_bank_code(hospital),
+        account_name: hospital.corporate_account_name.trim().to_owned(),
+        account_number: hospital.corporate_account_number.trim().to_owned(),
+        failure_reason: None,
+    }
+}
+
+fn hospital_bank_code(hospital: &Hospital) -> Option<String> {
+    hospital
+        .corporate_bank_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn settlement_reference_for_case(medical_case_id: uuid::Uuid) -> String {
+    format!("korede-settlement-{}", medical_case_id.simple())
+}
+
+fn transfer_failure_status(error: &PaymentGatewayError) -> HospitalSettlementStatus {
+    match error {
+        PaymentGatewayError::MissingConfig(_) => HospitalSettlementStatus::FailedConfig,
+        PaymentGatewayError::RequestFailed | PaymentGatewayError::Provider(_) => {
+            HospitalSettlementStatus::Failed
+        }
+    }
+}
+
+fn settlement_status_from_transfer_status(status: &TransferStatus) -> HospitalSettlementStatus {
+    match status {
+        TransferStatus::Success => HospitalSettlementStatus::Paid,
+        TransferStatus::Failed => HospitalSettlementStatus::Failed,
+        TransferStatus::OtpRequired => HospitalSettlementStatus::OtpRequired,
+        TransferStatus::Pending => HospitalSettlementStatus::Processing,
+    }
+}
+
+async fn finalize_transfer_webhook(
+    state: AppState,
+    event: &str,
+    data: PaystackWebhookData,
+) -> Result<Json<PaystackWebhookResponse>, ApiError> {
+    let Some(status) = settlement_status_from_transfer_webhook(event, data.status.as_deref())
+    else {
+        return Ok(Json(PaystackWebhookResponse {
+            status: "ignored".to_owned(),
+        }));
+    };
+
+    let settlement = match data
+        .reference
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(reference) => {
+            state
+                .settlement_repository
+                .find_by_reference(reference)
+                .await?
+        }
+        None => None,
+    };
+    let settlement = if settlement.is_none() {
+        match data
+            .transfer_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(transfer_code) => {
+                state
+                    .settlement_repository
+                    .find_by_transfer_code(transfer_code)
+                    .await?
+            }
+            None => None,
+        }
+    } else {
+        settlement
+    };
+
+    let Some(settlement) = settlement else {
+        return Ok(Json(PaystackWebhookResponse {
+            status: "ignored".to_owned(),
+        }));
+    };
+
+    if settlement.status == status {
+        return Ok(Json(PaystackWebhookResponse {
+            status: "already_processed".to_owned(),
+        }));
+    }
+
+    let failure_reason = if matches!(
+        status,
+        HospitalSettlementStatus::Failed | HospitalSettlementStatus::Reversed
+    ) {
+        data.failure_reason
+            .or_else(|| Some(format!("Paystack transfer event: {event}")))
+    } else {
+        None
+    };
+
+    state
+        .settlement_repository
+        .update_transfer(SettlementTransferUpdate {
+            settlement_id: settlement.id,
+            status,
+            paystack_transfer_code: data.transfer_code,
+            paystack_transfer_id: data.id,
+            paystack_status: data.status.or_else(|| Some(event.to_owned())),
+            failure_reason,
+        })
+        .await?;
+
+    Ok(Json(PaystackWebhookResponse {
+        status: "processed".to_owned(),
+    }))
+}
+
+fn settlement_status_from_transfer_webhook(
+    event: &str,
+    provider_status: Option<&str>,
+) -> Option<HospitalSettlementStatus> {
+    match event {
+        "transfer.success" => Some(HospitalSettlementStatus::Paid),
+        "transfer.failed" => Some(HospitalSettlementStatus::Failed),
+        "transfer.reversed" => Some(HospitalSettlementStatus::Reversed),
+        "transfer.otp" => Some(HospitalSettlementStatus::OtpRequired),
+        _ => provider_status.map(|status| match status {
+            "success" => HospitalSettlementStatus::Paid,
+            "failed" => HospitalSettlementStatus::Failed,
+            "reversed" => HospitalSettlementStatus::Reversed,
+            "otp" => HospitalSettlementStatus::OtpRequired,
+            _ => HospitalSettlementStatus::Processing,
+        }),
+    }
 }
 
 async fn notify_patient_case_funded(state: &AppState, medical_case: &MedicalCase) {
@@ -885,6 +1251,7 @@ fn validate_paystack_webhook_signature(
 mod tests {
     use super::*;
     use crate::domain::donation::{Donation, DonationMethod, DonationProofStatus};
+    use crate::domain::hospital::HospitalVerificationStatus;
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -926,12 +1293,100 @@ mod tests {
         }
     }
 
+    fn test_hospital(bank_code: Option<String>) -> Hospital {
+        let now = Utc::now();
+        Hospital {
+            id: Uuid::new_v4(),
+            name: "Lagoon Hospital".to_owned(),
+            email: "admin@lagoon.example".to_owned(),
+            email_verified: true,
+            email_verified_at: Some(now),
+            password_hash: "hash".to_owned(),
+            phone_number: Some("+2348012345678".to_owned()),
+            official_address: Some("1 Hospital Road".to_owned()),
+            administrator_name: Some("Dr Jane".to_owned()),
+            cac_registration_number: Some("RC123".to_owned()),
+            medical_license_number: Some("ML123".to_owned()),
+            corporate_account_name: "Lagoon Hospital".to_owned(),
+            corporate_account_number: "0123456789".to_owned(),
+            corporate_bank_code: bank_code,
+            bank_name: "Wema Bank".to_owned(),
+            verification_status: HospitalVerificationStatus::Verified,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     #[test]
     fn existing_dva_webhook_status_is_idempotent_for_paid_donation() {
         let donation = donation_with_status(DonationStatus::Paid);
         assert_eq!(
             existing_dva_webhook_status(&donation),
             Some("already_processed")
+        );
+    }
+
+    #[test]
+    fn settlement_reference_is_stable_for_case_id() {
+        let case_id = Uuid::new_v4();
+
+        assert_eq!(
+            settlement_reference_for_case(case_id),
+            settlement_reference_for_case(case_id)
+        );
+        assert!(settlement_reference_for_case(case_id).starts_with("korede-settlement-"));
+    }
+
+    #[test]
+    fn hospital_bank_code_trims_blank_values() {
+        assert_eq!(
+            hospital_bank_code(&test_hospital(Some(" 035 ".to_owned()))),
+            Some("035".to_owned())
+        );
+        assert_eq!(
+            hospital_bank_code(&test_hospital(Some(" ".to_owned()))),
+            None
+        );
+        assert_eq!(hospital_bank_code(&test_hospital(None)), None);
+    }
+
+    #[test]
+    fn transfer_status_maps_to_settlement_status() {
+        assert_eq!(
+            settlement_status_from_transfer_status(&TransferStatus::Success),
+            HospitalSettlementStatus::Paid
+        );
+        assert_eq!(
+            settlement_status_from_transfer_status(&TransferStatus::Pending),
+            HospitalSettlementStatus::Processing
+        );
+        assert_eq!(
+            settlement_status_from_transfer_status(&TransferStatus::OtpRequired),
+            HospitalSettlementStatus::OtpRequired
+        );
+        assert_eq!(
+            settlement_status_from_transfer_status(&TransferStatus::Failed),
+            HospitalSettlementStatus::Failed
+        );
+    }
+
+    #[test]
+    fn transfer_webhook_event_maps_to_settlement_status() {
+        assert_eq!(
+            settlement_status_from_transfer_webhook("transfer.success", None),
+            Some(HospitalSettlementStatus::Paid)
+        );
+        assert_eq!(
+            settlement_status_from_transfer_webhook("transfer.failed", None),
+            Some(HospitalSettlementStatus::Failed)
+        );
+        assert_eq!(
+            settlement_status_from_transfer_webhook("transfer.reversed", None),
+            Some(HospitalSettlementStatus::Reversed)
+        );
+        assert_eq!(
+            settlement_status_from_transfer_webhook("transfer.update", Some("otp")),
+            Some(HospitalSettlementStatus::OtpRequired)
         );
     }
 

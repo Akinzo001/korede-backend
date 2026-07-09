@@ -9,7 +9,7 @@ use crate::port::{
     donation::DonationRepositoryError, hospital::HospitalRepositoryError,
     medical_case::MedicalCaseRepositoryError, patient::PatientRepositoryError,
     patient_declaration::PatientDeclarationRepositoryError, payment::PaymentGatewayError,
-    sui::DonationProofError,
+    settlement::SettlementRepositoryError, sui::DonationProofError,
 };
 
 #[derive(Debug, Serialize)]
@@ -149,6 +149,20 @@ impl From<PaymentGatewayError> for ApiError {
                 Self::Internal("failed to contact payment provider".to_owned())
             }
             PaymentGatewayError::Provider(message) => Self::BadRequest(message),
+        }
+    }
+}
+
+impl From<SettlementRepositoryError> for ApiError {
+    fn from(error: SettlementRepositoryError) -> Self {
+        match error {
+            SettlementRepositoryError::NotFound => {
+                Self::NotFound("hospital settlement not found".to_owned())
+            }
+            SettlementRepositoryError::Database(error) => {
+                tracing::error!(%error, "database operation failed");
+                Self::Internal("internal server error".to_owned())
+            }
         }
     }
 }

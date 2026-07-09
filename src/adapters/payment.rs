@@ -8,6 +8,8 @@ use crate::{
     port::payment::{
         CheckoutInitialization, CheckoutInitializationRequest, DvaAssignment, DvaAssignmentRequest,
         PaymentGateway, PaymentGatewayError, PaymentVerification, PaymentVerificationStatus,
+        TransferInitiation, TransferInitiationRequest, TransferRecipient, TransferRecipientRequest,
+        TransferStatus, TransferVerification,
     },
 };
 
@@ -16,6 +18,7 @@ pub struct PaystackPaymentGateway {
     client: Client,
     secret_key: String,
     preferred_bank: String,
+    transfer_source: String,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +104,49 @@ struct PaystackVerifyResponse {
     paid_at: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct PaystackTransferRecipientCreateRequest<'a> {
+    #[serde(rename = "type")]
+    recipient_type: &'a str,
+    name: &'a str,
+    account_number: &'a str,
+    bank_code: &'a str,
+    currency: &'a str,
+    description: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaystackTransferRecipientResponse {
+    id: Option<i64>,
+    recipient_code: String,
+    details: Option<PaystackTransferRecipientDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaystackTransferRecipientDetails {
+    account_name: Option<String>,
+    bank_name: Option<String>,
+    bank_code: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PaystackTransferCreateRequest<'a> {
+    source: &'a str,
+    amount: i64,
+    recipient: &'a str,
+    reason: &'a str,
+    reference: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaystackTransferResponse {
+    id: Option<i64>,
+    transfer_code: Option<String>,
+    status: Option<String>,
+    #[serde(default)]
+    failure_reason: Option<String>,
+}
+
 impl PaystackPaymentGateway {
     pub fn is_configured(config: &PaymentConfig) -> bool {
         config.paystack_secret_key.is_some()
@@ -116,6 +162,7 @@ impl PaystackPaymentGateway {
             client: Client::new(),
             secret_key,
             preferred_bank: config.paystack_dva_preferred_bank.clone(),
+            transfer_source: config.paystack_transfer_source.clone(),
         })
     }
 
@@ -382,6 +429,151 @@ impl PaymentGateway for PaystackPaymentGateway {
         })
     }
 
+    async fn create_transfer_recipient(
+        &self,
+        request: TransferRecipientRequest,
+    ) -> Result<TransferRecipient, PaymentGatewayError> {
+        let payload = PaystackTransferRecipientCreateRequest {
+            recipient_type: "nuban",
+            name: &request.name,
+            account_number: &request.account_number,
+            bank_code: &request.bank_code,
+            currency: &request.currency,
+            description: &request.description,
+        };
+
+        let response = self
+            .client
+            .post("https://api.paystack.co/transferrecipient")
+            .bearer_auth(&self.secret_key)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|_| PaymentGatewayError::RequestFailed)?;
+
+        if !response.status().is_success() {
+            return Err(PaymentGatewayError::Provider(
+                response.text().await.unwrap_or_default(),
+            ));
+        }
+
+        let envelope: PaystackEnvelope<PaystackTransferRecipientResponse> =
+            response
+                .json()
+                .await
+                .map_err(|_| PaymentGatewayError::RequestFailed)?;
+
+        if !envelope.status {
+            return Err(PaymentGatewayError::Provider(envelope.message));
+        }
+
+        Ok(TransferRecipient {
+            recipient_code: envelope.data.recipient_code,
+            provider_id: envelope.data.id,
+            account_name: envelope
+                .data
+                .details
+                .as_ref()
+                .and_then(|details| details.account_name.clone()),
+            bank_name: envelope
+                .data
+                .details
+                .as_ref()
+                .and_then(|details| details.bank_name.clone()),
+            bank_code: envelope.data.details.and_then(|details| details.bank_code),
+        })
+    }
+
+    async fn initiate_transfer(
+        &self,
+        request: TransferInitiationRequest,
+    ) -> Result<TransferInitiation, PaymentGatewayError> {
+        let source = if request.source.trim().is_empty() {
+            self.transfer_source.as_str()
+        } else {
+            request.source.as_str()
+        };
+        let payload = PaystackTransferCreateRequest {
+            source,
+            amount: request.amount_kobo,
+            recipient: &request.recipient_code,
+            reason: &request.reason,
+            reference: &request.reference,
+        };
+
+        let response = self
+            .client
+            .post("https://api.paystack.co/transfer")
+            .bearer_auth(&self.secret_key)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|_| PaymentGatewayError::RequestFailed)?;
+
+        if !response.status().is_success() {
+            return Err(PaymentGatewayError::Provider(
+                response.text().await.unwrap_or_default(),
+            ));
+        }
+
+        let envelope: PaystackEnvelope<PaystackTransferResponse> = response
+            .json()
+            .await
+            .map_err(|_| PaymentGatewayError::RequestFailed)?;
+
+        if !envelope.status {
+            return Err(PaymentGatewayError::Provider(envelope.message));
+        }
+
+        let provider_status = envelope.data.status.clone();
+        Ok(TransferInitiation {
+            transfer_code: envelope.data.transfer_code,
+            provider_id: envelope.data.id,
+            status: transfer_status_from_paystack(provider_status.as_deref()),
+            provider_status,
+            message: envelope.data.failure_reason,
+        })
+    }
+
+    async fn verify_transfer(
+        &self,
+        reference: &str,
+    ) -> Result<TransferVerification, PaymentGatewayError> {
+        let response = self
+            .client
+            .get(format!(
+                "https://api.paystack.co/transfer/verify/{reference}"
+            ))
+            .bearer_auth(&self.secret_key)
+            .send()
+            .await
+            .map_err(|_| PaymentGatewayError::RequestFailed)?;
+
+        if !response.status().is_success() {
+            return Err(PaymentGatewayError::Provider(
+                response.text().await.unwrap_or_default(),
+            ));
+        }
+
+        let envelope: PaystackEnvelope<PaystackTransferResponse> = response
+            .json()
+            .await
+            .map_err(|_| PaymentGatewayError::RequestFailed)?;
+
+        if !envelope.status {
+            return Err(PaymentGatewayError::Provider(envelope.message));
+        }
+
+        let provider_status = envelope.data.status.clone();
+        Ok(TransferVerification {
+            transfer_code: envelope.data.transfer_code,
+            provider_id: envelope.data.id,
+            status: transfer_status_from_paystack(provider_status.as_deref()),
+            provider_status,
+            failure_reason: envelope.data.failure_reason,
+        })
+    }
+
     fn generate_reference(&self) -> String {
         format!("korede-{}", Uuid::new_v4().simple())
     }
@@ -414,8 +606,38 @@ impl PaymentGateway for DisabledPaymentGateway {
         Err(PaymentGatewayError::MissingConfig("PAYSTACK_SECRET_KEY"))
     }
 
+    async fn create_transfer_recipient(
+        &self,
+        _request: TransferRecipientRequest,
+    ) -> Result<TransferRecipient, PaymentGatewayError> {
+        Err(PaymentGatewayError::MissingConfig("PAYSTACK_SECRET_KEY"))
+    }
+
+    async fn initiate_transfer(
+        &self,
+        _request: TransferInitiationRequest,
+    ) -> Result<TransferInitiation, PaymentGatewayError> {
+        Err(PaymentGatewayError::MissingConfig("PAYSTACK_SECRET_KEY"))
+    }
+
+    async fn verify_transfer(
+        &self,
+        _reference: &str,
+    ) -> Result<TransferVerification, PaymentGatewayError> {
+        Err(PaymentGatewayError::MissingConfig("PAYSTACK_SECRET_KEY"))
+    }
+
     fn generate_reference(&self) -> String {
         format!("korede-disabled-{}", Uuid::new_v4().simple())
+    }
+}
+
+fn transfer_status_from_paystack(status: Option<&str>) -> TransferStatus {
+    match status.unwrap_or_default() {
+        "success" => TransferStatus::Success,
+        "failed" | "reversed" => TransferStatus::Failed,
+        "otp" => TransferStatus::OtpRequired,
+        _ => TransferStatus::Pending,
     }
 }
 
@@ -473,6 +695,9 @@ mod tests {
             paystack_webhook_secret: None,
             paystack_dva_preferred_bank: "test-bank".to_owned(),
             paystack_dva_country: "NG".to_owned(),
+            paystack_transfers_enabled: false,
+            paystack_transfer_currency: "NGN".to_owned(),
+            paystack_transfer_source: "balance".to_owned(),
             flutterwave_secret_key: None,
         };
 
