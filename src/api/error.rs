@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Serialize;
 
+use crate::application::hospital_cases::HospitalCaseError;
 use crate::port::{
     donation::DonationRepositoryError, hospital::HospitalRepositoryError,
     medical_case::MedicalCaseRepositoryError, patient::PatientRepositoryError,
@@ -177,6 +178,38 @@ impl From<DonationProofError> for ApiError {
                 Self::Internal("failed to publish donation proof".to_owned())
             }
             DonationProofError::Provider(message) => Self::Internal(message),
+        }
+    }
+}
+
+impl From<HospitalCaseError> for ApiError {
+    fn from(error: HospitalCaseError) -> Self {
+        match error {
+            HospitalCaseError::Validation(message) => Self::BadRequest(message),
+            HospitalCaseError::HospitalNotVerified => Self::Forbidden(error.to_string()),
+            HospitalCaseError::PatientNotFound => Self::NotFound("patient not found".to_owned()),
+            HospitalCaseError::PatientEmailRequired => {
+                Self::BadRequest("patient email is required".to_owned())
+            }
+            HospitalCaseError::PatientDeclarationRequired => {
+                Self::BadRequest("patient declaration is required before case creation".to_owned())
+            }
+            HospitalCaseError::PatientHasOpenCase => {
+                Self::Conflict("patient already has an open medical case".to_owned())
+            }
+            HospitalCaseError::HospitalNotFound => Self::NotFound("hospital not found".to_owned()),
+            HospitalCaseError::HospitalRepository(error) => error.into(),
+            HospitalCaseError::PatientRepository(error) => error.into(),
+            HospitalCaseError::PatientDeclarationRepository(error) => error.into(),
+            HospitalCaseError::MedicalCaseRepository(error) => error.into(),
+            HospitalCaseError::DocumentStorage(error) => {
+                tracing::error!(%error, "case document storage failed");
+                Self::Internal("failed to store document".to_owned())
+            }
+            HospitalCaseError::Email(error) => {
+                tracing::error!(%error, "patient case notification failed");
+                Self::Internal("failed to send patient case creation email".to_owned())
+            }
         }
     }
 }

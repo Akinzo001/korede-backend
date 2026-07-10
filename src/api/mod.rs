@@ -33,6 +33,7 @@ use utoipa::OpenApi;
 // `SwaggerUi` serves browser-based API documentation.
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::application::hospital_cases::HospitalCaseService;
 use crate::port::{
     auth::{PasswordHasher, TokenService},
     donation::DonationRepository,
@@ -71,6 +72,7 @@ pub struct AppState {
     pub donation_proof_publisher: Arc<dyn DonationProofPublisher>,
     pub document_storage: Arc<dyn DocumentStorage>,
     pub email_service: Arc<dyn EmailService>,
+    pub hospital_case_service: Arc<HospitalCaseService>,
     pub jwt_expires_in_seconds: i64,
     pub refresh_token_expires_in_seconds: i64,
     pub max_upload_bytes: usize,

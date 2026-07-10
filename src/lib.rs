@@ -6,6 +6,9 @@
 // Infrastructure adapters, such as PostgreSQL.
 pub mod adapters;
 
+// Application services that orchestrate business workflows through ports.
+pub mod application;
+
 // HTTP/API layer, such as Axum routes and Swagger docs.
 pub mod api;
 

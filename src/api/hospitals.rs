@@ -12,6 +12,9 @@ use uuid::Uuid;
 
 use crate::{
     api::{error::ApiError, tokens::issue_refresh_token, AppState},
+    application::hospital_cases::{
+        BillingItemCommand, CaseDocumentCommand, CreateHospitalCaseCommand,
+    },
     domain::{
         hospital::{Hospital, HospitalVerificationStatus},
         hospital_document::{HospitalDocument, HospitalDocumentType},
@@ -28,10 +31,7 @@ use crate::{
             HospitalRepositoryError, NewHospital, NewHospitalAuditLog, NewHospitalDocument,
             NewHospitalEmailOtp, NewHospitalLoginOtp,
         },
-        medical_case::{
-            HospitalMedicalCaseSummary, NewMedicalCase, NewMedicalCaseBillingItem,
-            NewMedicalCaseDocument,
-        },
+        medical_case::HospitalMedicalCaseSummary,
     },
 };
 
@@ -557,51 +557,6 @@ async fn send_registration_acknowledgement(
         .map_err(|error| {
             tracing::error!(%error, hospital_id = %hospital.id, "failed to send hospital registration acknowledgement email");
             ApiError::Internal("failed to send registration acknowledgement email".to_owned())
-        })
-}
-
-async fn send_patient_case_created_email(
-    state: &AppState,
-    patient_email: &str,
-    patient_name: &str,
-    hospital_name: &str,
-    case_title: &str,
-    bill_amount_kobo: i64,
-    public_slug: &str,
-) -> Result<(), ApiError> {
-    let public_link = public_case_link(public_slug);
-    let amount = format_ngn_amount(bill_amount_kobo);
-    let subject = "A hospital medical case has been created for you".to_owned();
-    let text_body = format!(
-        "Hello {},\n\n{} has created a medical case for you on Korede Health.\n\nCase: {}\nAmount: {}\nLink: {}\n\nThank you,\nKorede Health",
-        patient_name.trim(),
-        hospital_name.trim(),
-        case_title.trim(),
-        amount,
-        public_link
-    );
-    let html_body = format!(
-        "<p>Hello {},</p><p>{} has created a medical case for you on Korede Health.</p><p><strong>Case:</strong> {}</p><p><strong>Amount:</strong> {}</p><p><strong>Link:</strong> {}</p><p>Thank you,<br>Korede Health</p>",
-        patient_name.trim(),
-        hospital_name.trim(),
-        case_title.trim(),
-        amount,
-        public_link
-    );
-
-    state
-        .email_service
-        .send(EmailMessage {
-            to_email: patient_email.to_owned(),
-            to_name: Some(patient_name.trim().to_owned()),
-            subject,
-            text_body,
-            html_body: Some(html_body),
-        })
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, %patient_email, "failed to send patient case creation email");
-            ApiError::Internal("failed to send patient case creation email".to_owned())
         })
 }
 
@@ -1145,8 +1100,8 @@ pub async fn list_active_cases(
     State(state): State<AppState>,
 ) -> Result<Json<HospitalActiveCasesResponse>, ApiError> {
     let cases = state
-        .medical_case_repository
-        .list_hospital_active_cases(authenticated.hospital_id)
+        .hospital_case_service
+        .list_active_cases(authenticated.hospital_id)
         .await?
         .into_iter()
         .map(HospitalActiveCaseResponse::from)
@@ -1170,8 +1125,8 @@ pub async fn list_completed_cases(
     State(state): State<AppState>,
 ) -> Result<Json<HospitalCompletedCasesResponse>, ApiError> {
     let cases = state
-        .medical_case_repository
-        .list_hospital_completed_cases(authenticated.hospital_id)
+        .hospital_case_service
+        .list_completed_cases(authenticated.hospital_id)
         .await?
         .into_iter()
         .map(HospitalCompletedCaseResponse::from)
@@ -1202,127 +1157,36 @@ pub async fn create_case(
     State(state): State<AppState>,
     Json(request): Json<CreateHospitalCaseRequest>,
 ) -> Result<Json<CreateHospitalCaseResponse>, ApiError> {
-    validate_create_case_request(&request)?;
-
-    let hospital = state
-        .hospital_repository
-        .find_hospital_by_id(authenticated.hospital_id)
-        .await?
-        .ok_or(HospitalRepositoryError::NotFound)?;
-    ensure_hospital_can_create_case(&hospital)?;
-
-    let patient = state
-        .patient_repository
-        .find_patient_by_username(&request.patient_username)
-        .await?
-        .ok_or_else(|| ApiError::NotFound("patient not found".to_owned()))?;
-
-    if state
-        .medical_case_repository
-        .patient_has_open_case(patient.id)
-        .await?
-    {
-        return Err(ApiError::Conflict(
-            "patient already has an open medical case".to_owned(),
-        ));
-    }
-
-    let patient_email = patient
-        .email
-        .clone()
-        .ok_or_else(|| ApiError::BadRequest("patient email is required".to_owned()))?;
-
-    let declaration = state
-        .patient_declaration_repository
-        .find_current_patient_declaration(patient.id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::BadRequest("patient declaration is required before case creation".to_owned())
-        })?;
-
-    let case_id = Uuid::new_v4();
-    let public_slug = generate_case_public_slug(&request.patient_username, &request.title, case_id);
-    let mut stored_documents = Vec::with_capacity(request.documents.len());
-
-    for document in &request.documents {
-        let contents = decode_base64_document(
-            &Base64DocumentRequest {
-                original_filename: document.original_filename.clone(),
-                mime_type: document.mime_type.clone(),
-                content_base64: document.content_base64.clone(),
-            },
-            state.max_upload_bytes,
-        )?;
-        let mime_type = normalized_document_mime_type(&document.mime_type)?;
-        let stored = state
-            .document_storage
-            .save_case_document(
-                authenticated.hospital_id,
-                case_id,
-                document.document_type.trim(),
-                document.original_filename.trim(),
-                mime_type,
-                &contents,
-            )
-            .await
-            .map_err(|_| ApiError::Internal("failed to store document".to_owned()))?;
-
-        stored_documents.push(NewMedicalCaseDocument {
-            document_type: document.document_type.trim().to_owned(),
-            storage_provider: stored.storage_provider,
-            storage_key: stored.storage_key,
-            original_filename: stored.original_filename,
-            mime_type: stored.mime_type,
-            file_size_bytes: stored.file_size_bytes,
-        });
-    }
-
-    let billing_items = request
-        .billing_items
-        .iter()
-        .map(|item| {
-            Ok(NewMedicalCaseBillingItem {
-                description: item.description.trim().to_owned(),
-                amount_kobo: crate::api::money::naira_to_kobo(item.amount, "billing item amount")?,
-            })
-        })
-        .collect::<Result<Vec<_>, ApiError>>()?;
-    let bill_amount_kobo = billing_items.iter().try_fold(0_i64, |total, item| {
-        total
-            .checked_add(item.amount_kobo)
-            .ok_or_else(|| ApiError::BadRequest("billing total is too large".to_owned()))
-    })?;
-
     let created = state
-        .medical_case_repository
-        .create_published_case(
-            NewMedicalCase {
-                id: case_id,
-                hospital_id: authenticated.hospital_id,
-                patient_id: patient.id,
-                patient_declaration_id: declaration.id,
-                patient_declaration_statement: declaration.statement.clone(),
-                title: request.title.trim().to_owned(),
-                public_slug,
-                diagnosis_summary: request.diagnosis_summary.trim().to_owned(),
-                bill_amount_kobo,
+        .hospital_case_service
+        .create_case(
+            authenticated.hospital_id,
+            CreateHospitalCaseCommand {
+                patient_username: request.patient_username,
+                title: request.title,
+                diagnosis_summary: request.diagnosis_summary,
                 admitted_at: request.admitted_at,
+                billing_items: request
+                    .billing_items
+                    .into_iter()
+                    .map(|item| BillingItemCommand {
+                        description: item.description,
+                        amount_naira: item.amount,
+                    })
+                    .collect(),
+                documents: request
+                    .documents
+                    .into_iter()
+                    .map(|document| CaseDocumentCommand {
+                        document_type: document.document_type,
+                        original_filename: document.original_filename,
+                        mime_type: document.mime_type,
+                        content_base64: document.content_base64,
+                    })
+                    .collect(),
             },
-            billing_items,
-            stored_documents,
         )
         .await?;
-
-    send_patient_case_created_email(
-        &state,
-        &patient_email,
-        &patient.full_name,
-        &hospital.name,
-        &created.case.title,
-        created.case.bill_amount_kobo,
-        created.case.public_slug.as_deref().unwrap_or_default(),
-    )
-    .await?;
 
     Ok(Json(CreateHospitalCaseResponse {
         case: HospitalCaseResponse::from(created.case),
@@ -1427,53 +1291,6 @@ fn validate_registration(request: &RegisterHospitalRequest) -> Result<(), ApiErr
     Ok(())
 }
 
-fn validate_create_case_request(request: &CreateHospitalCaseRequest) -> Result<(), ApiError> {
-    if request.patient_username.trim().is_empty()
-        || request.title.trim().is_empty()
-        || request.diagnosis_summary.trim().is_empty()
-    {
-        return Err(ApiError::BadRequest(
-            "required fields are missing".to_owned(),
-        ));
-    }
-
-    if request.billing_items.is_empty() {
-        return Err(ApiError::BadRequest(
-            "at least one billing item is required".to_owned(),
-        ));
-    }
-
-    for item in &request.billing_items {
-        if item.description.trim().is_empty() {
-            return Err(ApiError::BadRequest(
-                "billing item description is required".to_owned(),
-            ));
-        }
-
-        if item.amount <= 0 {
-            return Err(ApiError::BadRequest(
-                "billing item amount must be greater than zero".to_owned(),
-            ));
-        }
-    }
-
-    for document in &request.documents {
-        if document.document_type.trim().is_empty()
-            || document.original_filename.trim().is_empty()
-            || document.mime_type.trim().is_empty()
-            || document.content_base64.trim().is_empty()
-        {
-            return Err(ApiError::BadRequest(
-                "document fields are required".to_owned(),
-            ));
-        }
-
-        validate_mime_type(document.mime_type.trim())?;
-    }
-
-    Ok(())
-}
-
 fn validate_email_otp_request(email: &str, otp: &str) -> Result<(), ApiError> {
     if email.trim().is_empty() || !email.contains('@') {
         return Err(ApiError::BadRequest("email is invalid".to_owned()));
@@ -1553,35 +1370,6 @@ fn generate_otp() -> String {
     format!("{value:06}")
 }
 
-fn generate_case_public_slug(patient_username: &str, title: &str, case_id: Uuid) -> String {
-    let prefix_source = format!("{} {}", patient_username.trim(), title.trim());
-    let mut slug = String::new();
-    let mut last_was_separator = false;
-
-    for character in prefix_source.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-            last_was_separator = false;
-        } else if (character.is_whitespace() || character == '-' || character == '_')
-            && !slug.is_empty()
-            && !last_was_separator
-        {
-            slug.push('-');
-            last_was_separator = true;
-        }
-
-        if slug.len() >= 80 {
-            break;
-        }
-    }
-
-    let slug = slug.trim_matches('-');
-    let slug = if slug.is_empty() { "case" } else { slug };
-    let unique_suffix = case_id.simple().to_string();
-
-    format!("{}-{}", slug, &unique_suffix[..8])
-}
-
 fn public_case_link(public_slug: &str) -> String {
     format!("/cases/{public_slug}")
 }
@@ -1590,49 +1378,11 @@ fn remaining_case_amount_kobo(bill_amount_kobo: i64, amount_raised_kobo: i64) ->
     (bill_amount_kobo - amount_raised_kobo).max(0)
 }
 
-fn format_ngn_amount(amount_kobo: i64) -> String {
-    let naira = amount_kobo / 100;
-    let kobo = amount_kobo.abs() % 100;
-    let mut digits = naira.abs().to_string();
-    let mut formatted = String::new();
-
-    while digits.len() > 3 {
-        let tail = digits.split_off(digits.len() - 3);
-        if formatted.is_empty() {
-            formatted = tail;
-        } else {
-            formatted = format!("{tail},{formatted}");
-        }
-    }
-
-    if formatted.is_empty() {
-        formatted = digits;
-    } else {
-        formatted = format!("{digits},{formatted}");
-    }
-
-    if amount_kobo < 0 {
-        formatted = format!("-{formatted}");
-    }
-
-    format!("NGN {formatted}.{kobo:02}")
-}
-
 fn dashboard_access_for(hospital: &Hospital) -> &'static str {
     match hospital.verification_status {
         HospitalVerificationStatus::Verified => "full",
         _ => "pending_review",
     }
-}
-
-fn ensure_hospital_can_create_case(hospital: &Hospital) -> Result<(), ApiError> {
-    if hospital.verification_status == HospitalVerificationStatus::Verified {
-        return Ok(());
-    }
-
-    Err(ApiError::Forbidden(
-        "hospital must be verified before creating medical cases".to_owned(),
-    ))
 }
 
 fn decode_base64_document(
@@ -2011,20 +1761,6 @@ mod tests {
         }
     }
 
-    fn valid_case_request() -> CreateHospitalCaseRequest {
-        CreateHospitalCaseRequest {
-            patient_username: "oluwaseun34".to_owned(),
-            title: "Right Femur Fracture Surgery".to_owned(),
-            diagnosis_summary: "Patient requires urgent ORIF surgery.".to_owned(),
-            admitted_at: None,
-            billing_items: vec![CreateHospitalCaseBillingItemRequest {
-                description: "Surgery".to_owned(),
-                amount: 1_500_000,
-            }],
-            documents: vec![],
-        }
-    }
-
     #[test]
     fn registration_validation_accepts_valid_request() {
         assert!(validate_registration(&valid_registration_request()).is_ok());
@@ -2106,50 +1842,6 @@ mod tests {
             validate_mime_type("text/plain"),
             Err(ApiError::UnsupportedMediaType(_))
         ));
-    }
-
-    #[test]
-    fn case_creation_validation_accepts_valid_request() {
-        assert!(validate_create_case_request(&valid_case_request()).is_ok());
-    }
-
-    #[test]
-    fn case_creation_validation_rejects_empty_billing_items() {
-        let mut request = valid_case_request();
-        request.billing_items.clear();
-
-        assert!(matches!(
-            validate_create_case_request(&request),
-            Err(ApiError::BadRequest(_))
-        ));
-    }
-
-    #[test]
-    fn case_creation_validation_rejects_non_positive_billing_amount() {
-        let mut request = valid_case_request();
-        request.billing_items[0].amount = 0;
-
-        assert!(matches!(
-            validate_create_case_request(&request),
-            Err(ApiError::BadRequest(_))
-        ));
-    }
-
-    #[test]
-    fn public_slug_generation_uses_patient_title_and_uuid_suffix() {
-        let case_id = Uuid::parse_str("12345678-90ab-cdef-1234-567890abcdef").unwrap();
-        let slug =
-            generate_case_public_slug("Oluwaseun34", "Right Femur Fracture Surgery", case_id);
-
-        assert_eq!(slug, "oluwaseun34-right-femur-fracture-surgery-12345678");
-    }
-
-    #[test]
-    fn public_slug_generation_falls_back_when_text_has_no_slug_content() {
-        let case_id = Uuid::parse_str("abcdef12-3456-7890-abcd-ef1234567890").unwrap();
-        let slug = generate_case_public_slug("!!!", "___", case_id);
-
-        assert_eq!(slug, "case-abcdef12");
     }
 
     #[test]
@@ -2239,12 +1931,6 @@ mod tests {
     }
 
     #[test]
-    fn ngn_amount_formatting_formats_kobo_as_readable_currency() {
-        assert_eq!(format_ngn_amount(150_000_000), "NGN 1,500,000.00");
-        assert_eq!(format_ngn_amount(12_345), "NGN 123.45");
-    }
-
-    #[test]
     fn otp_generation_returns_six_digits() {
         let otp = generate_otp();
 
@@ -2281,42 +1967,5 @@ mod tests {
         let hospital = hospital_with_status(HospitalVerificationStatus::Verified);
 
         assert_eq!(dashboard_access_for(&hospital), "full");
-    }
-
-    #[test]
-    fn verified_hospital_can_create_case() {
-        let hospital = hospital_with_status(HospitalVerificationStatus::Verified);
-
-        assert!(ensure_hospital_can_create_case(&hospital).is_ok());
-    }
-
-    #[test]
-    fn pending_hospital_cannot_create_case() {
-        let hospital = hospital_with_status(HospitalVerificationStatus::Pending);
-
-        assert!(matches!(
-            ensure_hospital_can_create_case(&hospital),
-            Err(ApiError::Forbidden(_))
-        ));
-    }
-
-    #[test]
-    fn rejected_hospital_cannot_create_case() {
-        let hospital = hospital_with_status(HospitalVerificationStatus::Rejected);
-
-        assert!(matches!(
-            ensure_hospital_can_create_case(&hospital),
-            Err(ApiError::Forbidden(_))
-        ));
-    }
-
-    #[test]
-    fn suspended_hospital_cannot_create_case() {
-        let hospital = hospital_with_status(HospitalVerificationStatus::Suspended);
-
-        assert!(matches!(
-            ensure_hospital_can_create_case(&hospital),
-            Err(ApiError::Forbidden(_))
-        ));
     }
 }

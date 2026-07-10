@@ -89,6 +89,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             as Arc<dyn korede_backend::port::sui::DonationProofPublisher>
     };
 
+    let hospital_case_service = Arc::new(
+        korede_backend::application::hospital_cases::HospitalCaseService::new(
+            hospital_repository.clone(),
+            medical_case_repository.clone(),
+            patient_repository.clone(),
+            patient_declaration_repository.clone(),
+            document_storage.clone(),
+            email_service.clone(),
+            config.storage.max_upload_bytes,
+        ),
+    );
+
     let retry_repository = donation_repository.clone();
     let retry_publisher = donation_proof_publisher.clone();
     tokio::spawn(async move {
@@ -115,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         donation_proof_publisher,
         document_storage,
         email_service,
+        hospital_case_service,
         jwt_expires_in_seconds: config.auth.jwt_expires_in_seconds,
         refresh_token_expires_in_seconds: config.auth.refresh_token_expires_in_seconds,
         max_upload_bytes: config.storage.max_upload_bytes,
