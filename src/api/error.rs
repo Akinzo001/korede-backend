@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::application::hospital_cases::HospitalCaseError;
+use crate::application::{hospital_cases::HospitalCaseError, payments::PaymentApplicationError};
 use crate::port::{
     donation::DonationRepositoryError, hospital::HospitalRepositoryError,
     medical_case::MedicalCaseRepositoryError, patient::PatientRepositoryError,
@@ -209,6 +209,32 @@ impl From<HospitalCaseError> for ApiError {
             HospitalCaseError::Email(error) => {
                 tracing::error!(%error, "patient case notification failed");
                 Self::Internal("failed to send patient case creation email".to_owned())
+            }
+        }
+    }
+}
+
+impl From<PaymentApplicationError> for ApiError {
+    fn from(error: PaymentApplicationError) -> Self {
+        match error {
+            PaymentApplicationError::BadRequest(message) => Self::BadRequest(message),
+            PaymentApplicationError::DonationNotFound => {
+                Self::NotFound("donation not found".to_owned())
+            }
+            PaymentApplicationError::HospitalNotFound => {
+                Self::NotFound("hospital not found".to_owned())
+            }
+            PaymentApplicationError::PatientNotFound => {
+                Self::NotFound("patient not found".to_owned())
+            }
+            PaymentApplicationError::DonationRepository(error) => error.into(),
+            PaymentApplicationError::HospitalRepository(error) => error.into(),
+            PaymentApplicationError::PatientRepository(error) => error.into(),
+            PaymentApplicationError::SettlementRepository(error) => error.into(),
+            PaymentApplicationError::PaymentGateway(error) => error.into(),
+            PaymentApplicationError::Email(error) => {
+                tracing::error!(%error, "payment notification email failed");
+                Self::Internal("failed to send payment notification email".to_owned())
             }
         }
     }

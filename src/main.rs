@@ -100,6 +100,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.storage.max_upload_bytes,
         ),
     );
+    let payment_service = Arc::new(
+        korede_backend::application::payments::PaymentApplicationService::new(
+            donation_repository.clone(),
+            hospital_repository.clone(),
+            patient_repository.clone(),
+            settlement_repository.clone(),
+            payment_gateway.clone(),
+            donation_proof_publisher.clone(),
+            email_service.clone(),
+            config.payments.base_url.clone(),
+            config.payments.paystack_transfers_enabled,
+            config.payments.paystack_transfer_currency.clone(),
+            config.payments.paystack_transfer_source.clone(),
+        ),
+    );
 
     let retry_repository = donation_repository.clone();
     let retry_publisher = donation_proof_publisher.clone();
@@ -128,6 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         document_storage,
         email_service,
         hospital_case_service,
+        payment_service,
         jwt_expires_in_seconds: config.auth.jwt_expires_in_seconds,
         refresh_token_expires_in_seconds: config.auth.refresh_token_expires_in_seconds,
         max_upload_bytes: config.storage.max_upload_bytes,

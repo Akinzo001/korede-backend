@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     adapters::donation_proof_retry::next_retry_at,
-    api::{error::ApiError, payments::process_hospital_settlement_for_case, AppState},
+    api::{error::ApiError, AppState},
     domain::{
         donation::{Donation, DonationProofStatus, DonationStatus},
         hospital::{Hospital, HospitalVerificationStatus},
@@ -597,7 +597,10 @@ pub async fn retry_admin_settlement(
         .await?
         .ok_or_else(|| ApiError::NotFound("medical case not found".to_owned()))?;
 
-    let updated = process_hospital_settlement_for_case(&state, &medical_case).await?;
+    let updated = state
+        .payment_service
+        .process_hospital_settlement_for_case(&medical_case)
+        .await?;
     let operation = state
         .settlement_repository
         .get_admin_settlement(updated.id)
