@@ -9,29 +9,24 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
-    adapters::donation_proof_retry::next_retry_at,
     api::{error::ApiError, AppState},
+    application::{
+        admin_donations::AdminDonationListCommand, admin_hospitals::ReviewHospitalDocumentCommand,
+    },
     domain::{
-        donation::{Donation, DonationProofStatus, DonationStatus},
+        donation::{Donation, DonationStatus},
         hospital::{Hospital, HospitalVerificationStatus},
-        hospital_document::{HospitalDocument, HospitalDocumentStatus, HospitalDocumentType},
+        hospital_document::HospitalDocument,
         patient_declaration::PatientDeclaration,
         settlement::{HospitalSettlement, HospitalSettlementStatus},
     },
     port::{
         auth::AuthenticatedAdmin,
-        donation::{
-            AdminDonationFilters, AdminDonationListQuery, AdminDonationOperation,
-            DonationProofAttemptUpdate,
-        },
-        email::EmailMessage,
-        hospital::{HospitalDocumentReview, HospitalRepositoryError},
+        donation::AdminDonationOperation,
+        hospital::HospitalRepositoryError,
         settlement::{AdminSettlementListQuery, AdminSettlementOperation},
-        sui::{DonationProofError, DonationProofReceipt, DonationProofRequest},
     },
 };
-
-const MAX_REVIEW_MESSAGE_LENGTH: usize = 2_000;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -337,15 +332,24 @@ pub async fn list_admin_donations(
     State(state): State<AppState>,
     Query(params): Query<AdminDonationListParams>,
 ) -> Result<Json<AdminDonationsResponse>, ApiError> {
-    let query = admin_donation_list_query(params)?;
-    let total = state
-        .donation_repository
-        .count_admin_donations(query.filters.clone())
+    let result = state
+        .admin_donation_service
+        .list_donations(AdminDonationListCommand {
+            status: params.status,
+            method: params.method,
+            proof_status: params.proof_status,
+            hospital_id: params.hospital_id,
+            medical_case_id: params.medical_case_id,
+            paystack_reference: params.paystack_reference,
+            is_late_payment: params.is_late_payment,
+            from: params.from,
+            to: params.to,
+            limit: params.limit,
+            offset: params.offset,
+        })
         .await?;
-    let donations = state
-        .donation_repository
-        .list_admin_donations(query.clone())
-        .await?
+    let donations = result
+        .donations
         .into_iter()
         .map(AdminDonationSummaryResponse::from)
         .collect();
@@ -353,9 +357,9 @@ pub async fn list_admin_donations(
     Ok(Json(AdminDonationsResponse {
         donations,
         pagination: AdminPaginationResponse {
-            limit: query.limit,
-            offset: query.offset,
-            total,
+            limit: result.limit,
+            offset: result.offset,
+            total: result.total,
         },
     }))
 }
@@ -380,10 +384,9 @@ pub async fn get_admin_donation(
     Path(donation_id): Path<Uuid>,
 ) -> Result<Json<AdminDonationDetailResponse>, ApiError> {
     let donation = state
-        .donation_repository
-        .get_admin_donation(donation_id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound("donation not found".to_owned()))?;
+        .admin_donation_service
+        .get_donation(donation_id)
+        .await?;
 
     Ok(Json(AdminDonationDetailResponse::from(donation)))
 }
@@ -408,51 +411,13 @@ pub async fn retry_donation_proof(
     State(state): State<AppState>,
     Path(donation_id): Path<Uuid>,
 ) -> Result<Json<AdminDonationProofRetryResponse>, ApiError> {
-    let operation = state
-        .donation_repository
-        .get_admin_donation(donation_id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound("donation not found".to_owned()))?;
-    validate_manual_retry_target(&operation.donation)?;
-
-    let now = Utc::now();
-    let attempt_count = operation.donation.proof_attempt_count + 1;
-    let proof_result = state
-        .donation_proof_publisher
-        .publish_donation_proof(DonationProofRequest {
-            case_id: operation.donation.medical_case_id.to_string(),
-            hospital_id: operation.hospital_id.to_string(),
-            amount_kobo: operation.donation.amount_kobo as u64,
-            payment_reference: operation.donation.paystack_reference.clone(),
-        })
-        .await;
-
-    let (message, update) = match proof_result {
-        Ok(receipt) => (
-            "published".to_owned(),
-            proof_retry_success_update(donation_id, attempt_count, receipt, now),
-        ),
-        Err(DonationProofError::MissingConfig(key)) => {
-            return Err(DonationProofError::MissingConfig(key).into());
-        }
-        Err(error) => {
-            let update =
-                proof_retry_failure_update(donation_id, attempt_count, error.to_string(), now);
-            let message = if update.proof_status == DonationProofStatus::Failed {
-                "failed".to_owned()
-            } else {
-                "scheduled_for_retry".to_owned()
-            };
-            (message, update)
-        }
-    };
-
-    let donation = state
-        .donation_repository
-        .update_donation_proof(update)
+    let result = state
+        .admin_donation_service
+        .retry_donation_proof(donation_id)
         .await?;
     Ok(Json(AdminDonationProofRetryResponse::from_parts(
-        message, donation,
+        result.message,
+        result.donation,
     )))
 }
 
@@ -725,33 +690,22 @@ pub async fn review_hospital_document(
     Path((hospital_id, document_id)): Path<(Uuid, Uuid)>,
     Json(request): Json<AdminReviewHospitalDocumentRequest>,
 ) -> Result<Json<AdminReviewHospitalDocumentResponse>, ApiError> {
-    let review = validate_document_review_request(&request)?;
-    state
-        .hospital_repository
-        .find_hospital_by_id(hospital_id)
-        .await?
-        .ok_or(HospitalRepositoryError::NotFound)?;
-
-    let document = state
-        .hospital_repository
-        .review_hospital_document(hospital_id, document_id, review.clone())
+    let result = state
+        .admin_hospital_service
+        .review_hospital_document(
+            hospital_id,
+            document_id,
+            ReviewHospitalDocumentCommand {
+                status: request.status,
+                message: request.message,
+            },
+        )
         .await?;
-    let documents = state
-        .hospital_repository
-        .list_hospital_documents(hospital_id)
-        .await?;
-    let verification_status = hospital_verification_status_after_document_review(&documents);
-    let hospital = state
-        .hospital_repository
-        .update_hospital_verification_status(hospital_id, verification_status.clone())
-        .await?;
-
-    send_hospital_document_review_email(&state, &hospital, &document, &verification_status).await?;
 
     Ok(Json(AdminReviewHospitalDocumentResponse {
-        document: AdminHospitalDocumentResponse::from(document),
-        hospital_verification_status: verification_status,
-        message: document_review_response_message(&review.status).to_owned(),
+        document: AdminHospitalDocumentResponse::from(result.document),
+        hospital_verification_status: result.hospital_verification_status,
+        message: result.message,
     }))
 }
 
@@ -783,29 +737,6 @@ pub async fn get_patient_declaration(
     Ok(Json(AdminPatientDeclarationResponse::from(declaration)))
 }
 
-fn admin_donation_list_query(
-    params: AdminDonationListParams,
-) -> Result<AdminDonationListQuery, ApiError> {
-    Ok(AdminDonationListQuery {
-        filters: AdminDonationFilters {
-            status: parse_optional_donation_status(params.status.as_deref())?,
-            method: parse_optional_donation_method(params.method.as_deref())?,
-            proof_status: parse_optional_proof_status(params.proof_status.as_deref())?,
-            hospital_id: params.hospital_id,
-            medical_case_id: params.medical_case_id,
-            paystack_reference: params
-                .paystack_reference
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty()),
-            is_late_payment: params.is_late_payment,
-            from: params.from,
-            to: params.to,
-        },
-        limit: normalize_limit(params.limit)?,
-        offset: normalize_offset(params.offset)?,
-    })
-}
-
 fn admin_settlement_list_query(
     params: AdminSettlementListParams,
     admin_action_required_only: bool,
@@ -832,282 +763,6 @@ fn admin_settlement_list_query(
         limit: normalize_limit(params.limit)?,
         offset: normalize_offset(params.offset)?,
     })
-}
-
-fn validate_document_review_request(
-    request: &AdminReviewHospitalDocumentRequest,
-) -> Result<HospitalDocumentReview, ApiError> {
-    let status = parse_document_review_status(&request.status)?;
-    let review_message = match status {
-        HospitalDocumentStatus::Approved => None,
-        HospitalDocumentStatus::Rejected => {
-            let message = request
-                .message
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    ApiError::BadRequest(
-                        "message is required when rejecting a hospital document".to_owned(),
-                    )
-                })?;
-
-            if message.chars().count() > MAX_REVIEW_MESSAGE_LENGTH {
-                return Err(ApiError::BadRequest(format!(
-                    "message cannot exceed {MAX_REVIEW_MESSAGE_LENGTH} characters"
-                )));
-            }
-
-            Some(message.to_owned())
-        }
-        HospitalDocumentStatus::Pending => {
-            return Err(ApiError::BadRequest(
-                "status must be approved or rejected".to_owned(),
-            ))
-        }
-    };
-
-    Ok(HospitalDocumentReview {
-        status,
-        review_message,
-    })
-}
-
-fn parse_document_review_status(value: &str) -> Result<HospitalDocumentStatus, ApiError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "approved" => Ok(HospitalDocumentStatus::Approved),
-        "rejected" => Ok(HospitalDocumentStatus::Rejected),
-        _ => Err(ApiError::BadRequest(
-            "status must be approved or rejected".to_owned(),
-        )),
-    }
-}
-
-fn hospital_verification_status_after_document_review(
-    documents: &[HospitalDocument],
-) -> HospitalVerificationStatus {
-    if required_document_status(documents, &HospitalDocumentType::CacCertificate)
-        == Some(HospitalDocumentStatus::Rejected)
-        || required_document_status(documents, &HospitalDocumentType::MedicalLicense)
-            == Some(HospitalDocumentStatus::Rejected)
-    {
-        return HospitalVerificationStatus::Rejected;
-    }
-
-    let cac_approved = required_document_status(documents, &HospitalDocumentType::CacCertificate)
-        == Some(HospitalDocumentStatus::Approved);
-    let license_approved =
-        required_document_status(documents, &HospitalDocumentType::MedicalLicense)
-            == Some(HospitalDocumentStatus::Approved);
-
-    if cac_approved && license_approved {
-        HospitalVerificationStatus::Verified
-    } else {
-        HospitalVerificationStatus::Pending
-    }
-}
-
-fn required_document_status(
-    documents: &[HospitalDocument],
-    document_type: &HospitalDocumentType,
-) -> Option<HospitalDocumentStatus> {
-    if documents.iter().any(|document| {
-        &document.document_type == document_type
-            && document.status == HospitalDocumentStatus::Rejected
-    }) {
-        return Some(HospitalDocumentStatus::Rejected);
-    }
-
-    if documents.iter().any(|document| {
-        &document.document_type == document_type
-            && document.status == HospitalDocumentStatus::Approved
-    }) {
-        return Some(HospitalDocumentStatus::Approved);
-    }
-
-    None
-}
-
-async fn send_hospital_document_review_email(
-    state: &AppState,
-    hospital: &Hospital,
-    document: &HospitalDocument,
-    verification_status: &HospitalVerificationStatus,
-) -> Result<(), ApiError> {
-    let message = hospital_document_review_email_message(hospital, document, verification_status);
-    state.email_service.send(message).await.map_err(|error| {
-        tracing::error!(%error, hospital_id = %hospital.id, document_id = %document.id, "failed to send hospital document review email");
-        ApiError::Internal("failed to send hospital document review email".to_owned())
-    })
-}
-
-fn hospital_document_review_email_message(
-    hospital: &Hospital,
-    document: &HospitalDocument,
-    verification_status: &HospitalVerificationStatus,
-) -> EmailMessage {
-    let document_name = hospital_document_type_label(&document.document_type);
-    match document.status {
-        HospitalDocumentStatus::Approved => {
-            let verified_note = if verification_status == &HospitalVerificationStatus::Verified {
-                "\n\nAll required verification documents have now been approved. Your hospital account is verified and has full dashboard access."
-            } else {
-                "\n\nWe will notify you once all required verification documents have been reviewed."
-            };
-            let html_verified_note = if verification_status == &HospitalVerificationStatus::Verified {
-                "<p>All required verification documents have now been approved. Your hospital account is verified and has full dashboard access.</p>"
-            } else {
-                "<p>We will notify you once all required verification documents have been reviewed.</p>"
-            };
-
-            EmailMessage {
-                to_email: hospital.email.clone(),
-                to_name: hospital.administrator_name.clone(),
-                subject: format!("Your {document_name} has been approved"),
-                text_body: format!(
-                    "Hello {},\n\nYour {} has been reviewed and approved.{}\n\nThank you,\nKorede Health",
-                    hospital_display_name(hospital),
-                    document_name,
-                    verified_note
-                ),
-                html_body: Some(format!(
-                    "<p>Hello {},</p><p>Your {} has been reviewed and approved.</p>{}<p>Thank you,<br>Korede Health</p>",
-                    hospital_display_name(hospital),
-                    document_name,
-                    html_verified_note
-                )),
-            }
-        }
-        HospitalDocumentStatus::Rejected => {
-            let reason = document.review_message.as_deref().unwrap_or(
-                "Your document did not meet the verification requirements. Please contact support for details.",
-            );
-            EmailMessage {
-                to_email: hospital.email.clone(),
-                to_name: hospital.administrator_name.clone(),
-                subject: format!("Your {document_name} was rejected"),
-                text_body: format!(
-                    "Hello {},\n\nYour {} has been reviewed and rejected.\n\nReason:\n{}\n\nPlease upload a corrected document or contact Korede Health support for help.\n\nThank you,\nKorede Health",
-                    hospital_display_name(hospital),
-                    document_name,
-                    reason
-                ),
-                html_body: Some(format!(
-                    "<p>Hello {},</p><p>Your {} has been reviewed and rejected.</p><p><strong>Reason:</strong><br>{}</p><p>Please upload a corrected document or contact Korede Health support for help.</p><p>Thank you,<br>Korede Health</p>",
-                    hospital_display_name(hospital),
-                    document_name,
-                    reason
-                )),
-            }
-        }
-        HospitalDocumentStatus::Pending => EmailMessage {
-            to_email: hospital.email.clone(),
-            to_name: hospital.administrator_name.clone(),
-            subject: format!("Your {document_name} is pending review"),
-            text_body: format!(
-                "Hello {},\n\nYour {} is still pending review.\n\nThank you,\nKorede Health",
-                hospital_display_name(hospital),
-                document_name
-            ),
-            html_body: Some(format!(
-                "<p>Hello {},</p><p>Your {} is still pending review.</p><p>Thank you,<br>Korede Health</p>",
-                hospital_display_name(hospital),
-                document_name
-            )),
-        },
-    }
-}
-
-fn hospital_document_type_label(document_type: &HospitalDocumentType) -> &'static str {
-    match document_type {
-        HospitalDocumentType::CacCertificate => "CAC certificate",
-        HospitalDocumentType::MedicalLicense => "medical license",
-    }
-}
-
-fn hospital_display_name(hospital: &Hospital) -> &str {
-    hospital
-        .administrator_name
-        .as_deref()
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or(&hospital.name)
-}
-
-fn document_review_response_message(status: &HospitalDocumentStatus) -> &'static str {
-    match status {
-        HospitalDocumentStatus::Approved => "hospital document approved",
-        HospitalDocumentStatus::Rejected => "hospital document rejected",
-        HospitalDocumentStatus::Pending => "hospital document pending review",
-    }
-}
-
-fn parse_optional_donation_status(value: Option<&str>) -> Result<Option<DonationStatus>, ApiError> {
-    let Some(value) = normalized_optional_filter(value) else {
-        return Ok(None);
-    };
-
-    let status = match value.as_str() {
-        "pending" => DonationStatus::Pending,
-        "paid" => DonationStatus::Paid,
-        "failed" => DonationStatus::Failed,
-        "expired" => DonationStatus::Expired,
-        "rejected_overflow" => DonationStatus::RejectedOverflow,
-        _ => {
-            return Err(ApiError::BadRequest(
-                "status must be pending, paid, failed, expired, or rejected_overflow".to_owned(),
-            ))
-        }
-    };
-
-    Ok(Some(status))
-}
-
-fn parse_optional_donation_method(
-    value: Option<&str>,
-) -> Result<Option<crate::domain::donation::DonationMethod>, ApiError> {
-    let Some(value) = normalized_optional_filter(value) else {
-        return Ok(None);
-    };
-
-    let method = match value.as_str() {
-        "checkout" => crate::domain::donation::DonationMethod::Checkout,
-        "dva_transfer" => crate::domain::donation::DonationMethod::DvaTransfer,
-        _ => {
-            return Err(ApiError::BadRequest(
-                "method must be checkout or dva_transfer".to_owned(),
-            ))
-        }
-    };
-
-    Ok(Some(method))
-}
-
-fn parse_optional_proof_status(
-    value: Option<&str>,
-) -> Result<Option<DonationProofStatus>, ApiError> {
-    let Some(value) = normalized_optional_filter(value) else {
-        return Ok(None);
-    };
-
-    let status = match value.as_str() {
-        "pending" => DonationProofStatus::Pending,
-        "pending_retry" => DonationProofStatus::PendingRetry,
-        "published" => DonationProofStatus::Published,
-        "failed" => DonationProofStatus::Failed,
-        _ => {
-            return Err(ApiError::BadRequest(
-                "proof_status must be pending, pending_retry, published, or failed".to_owned(),
-            ))
-        }
-    };
-
-    Ok(Some(status))
-}
-
-fn normalized_optional_filter(value: Option<&str>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
 }
 
 fn normalize_limit(limit: Option<i64>) -> Result<i64, ApiError> {
@@ -1196,65 +851,6 @@ fn settlement_retry_message(status: &HospitalSettlementStatus) -> &'static str {
         HospitalSettlementStatus::Failed => "failed",
         HospitalSettlementStatus::Reversed => "reversed",
         HospitalSettlementStatus::Pending | HospitalSettlementStatus::RecipientCreated => "pending",
-    }
-}
-
-fn validate_manual_retry_target(donation: &Donation) -> Result<(), ApiError> {
-    if donation.status != DonationStatus::Paid {
-        return Err(ApiError::Conflict(
-            "only paid donations can publish proof".to_owned(),
-        ));
-    }
-
-    if donation.proof_status == DonationProofStatus::Published {
-        return Err(ApiError::Conflict(
-            "donation proof is already published".to_owned(),
-        ));
-    }
-
-    Ok(())
-}
-
-fn proof_retry_success_update(
-    donation_id: Uuid,
-    attempt_count: i32,
-    receipt: DonationProofReceipt,
-    now: DateTime<Utc>,
-) -> DonationProofAttemptUpdate {
-    DonationProofAttemptUpdate {
-        donation_id,
-        proof_status: DonationProofStatus::Published,
-        sui_network: Some(receipt.network),
-        sui_tx_digest: Some(receipt.tx_digest),
-        proof_attempt_count: attempt_count,
-        proof_last_attempt_at: now,
-        proof_next_retry_at: None,
-        proof_last_error: None,
-        proof_published_at: Some(now),
-    }
-}
-
-fn proof_retry_failure_update(
-    donation_id: Uuid,
-    attempt_count: i32,
-    error: String,
-    now: DateTime<Utc>,
-) -> DonationProofAttemptUpdate {
-    let proof_next_retry_at = next_retry_at(attempt_count, now);
-    DonationProofAttemptUpdate {
-        donation_id,
-        proof_status: if proof_next_retry_at.is_some() {
-            DonationProofStatus::PendingRetry
-        } else {
-            DonationProofStatus::Failed
-        },
-        sui_network: None,
-        sui_tx_digest: None,
-        proof_attempt_count: attempt_count,
-        proof_last_attempt_at: now,
-        proof_next_retry_at,
-        proof_last_error: Some(error),
-        proof_published_at: None,
     }
 }
 
@@ -1482,8 +1078,9 @@ impl AdminDonationProofRetryResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::donation::DonationMethod;
-    use crate::domain::hospital_document::StorageProvider;
+    use crate::domain::hospital_document::{
+        HospitalDocumentStatus, HospitalDocumentType, StorageProvider,
+    };
     use chrono::TimeZone;
 
     #[test]
@@ -1514,97 +1111,6 @@ mod tests {
         assert!(constant_time_eq(b"secret", b"secret"));
         assert!(!constant_time_eq(b"secret", b"wrong"));
         assert!(!constant_time_eq(b"secret", b"secret1"));
-    }
-
-    #[test]
-    fn admin_donation_filters_reject_invalid_values() {
-        let params = AdminDonationListParams {
-            status: Some("complete".to_owned()),
-            method: None,
-            proof_status: None,
-            hospital_id: None,
-            medical_case_id: None,
-            paystack_reference: None,
-            is_late_payment: None,
-            from: None,
-            to: None,
-            limit: None,
-            offset: None,
-        };
-
-        assert!(matches!(
-            admin_donation_list_query(params),
-            Err(ApiError::BadRequest(_))
-        ));
-    }
-
-    #[test]
-    fn admin_donation_filters_accept_expired_checkout_status() {
-        assert_eq!(
-            parse_optional_donation_status(Some("expired")).unwrap(),
-            Some(DonationStatus::Expired)
-        );
-    }
-
-    #[test]
-    fn admin_donation_pagination_defaults_and_clamps_limit() {
-        let default_query = admin_donation_list_query(AdminDonationListParams {
-            status: None,
-            method: None,
-            proof_status: None,
-            hospital_id: None,
-            medical_case_id: None,
-            paystack_reference: None,
-            is_late_payment: None,
-            from: None,
-            to: None,
-            limit: None,
-            offset: None,
-        })
-        .expect("default pagination should be valid");
-
-        assert_eq!(default_query.limit, 50);
-        assert_eq!(default_query.offset, 0);
-
-        let clamped_query = admin_donation_list_query(AdminDonationListParams {
-            status: None,
-            method: None,
-            proof_status: None,
-            hospital_id: None,
-            medical_case_id: None,
-            paystack_reference: None,
-            is_late_payment: None,
-            from: None,
-            to: None,
-            limit: Some(500),
-            offset: Some(10),
-        })
-        .expect("large limit should be clamped");
-
-        assert_eq!(clamped_query.limit, 100);
-        assert_eq!(clamped_query.offset, 10);
-    }
-
-    #[test]
-    fn admin_donation_pagination_rejects_invalid_offset() {
-        let params = AdminDonationListParams {
-            status: None,
-            method: None,
-            proof_status: None,
-            hospital_id: None,
-            medical_case_id: None,
-            paystack_reference: None,
-            is_late_payment: None,
-            from: None,
-            to: None,
-            limit: Some(25),
-            offset: Some(-1),
-        };
-
-        assert!(matches!(
-            admin_donation_list_query(params),
-            Err(ApiError::BadRequest(_))
-        ));
     }
 
     #[test]
@@ -1689,24 +1195,6 @@ mod tests {
     }
 
     #[test]
-    fn manual_retry_rejects_unpaid_donation() {
-        let mut donation = test_donation(DonationStatus::Pending, DonationProofStatus::Pending);
-
-        assert!(matches!(
-            validate_manual_retry_target(&donation),
-            Err(ApiError::Conflict(_))
-        ));
-
-        donation.status = DonationStatus::Paid;
-        donation.proof_status = DonationProofStatus::Published;
-
-        assert!(matches!(
-            validate_manual_retry_target(&donation),
-            Err(ApiError::Conflict(_))
-        ));
-    }
-
-    #[test]
     fn settlement_retry_rejects_paid_processing_and_otp_required() {
         for status in [
             HospitalSettlementStatus::Paid,
@@ -1737,204 +1225,6 @@ mod tests {
     }
 
     #[test]
-    fn proof_retry_success_maps_receipt_into_published_state() {
-        let now = Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap();
-        let donation_id = Uuid::new_v4();
-
-        let update = proof_retry_success_update(
-            donation_id,
-            2,
-            DonationProofReceipt {
-                network: "testnet".to_owned(),
-                tx_digest: "digest-1".to_owned(),
-            },
-            now,
-        );
-
-        assert_eq!(update.donation_id, donation_id);
-        assert_eq!(update.proof_status, DonationProofStatus::Published);
-        assert_eq!(update.sui_network.as_deref(), Some("testnet"));
-        assert_eq!(update.sui_tx_digest.as_deref(), Some("digest-1"));
-        assert_eq!(update.proof_attempt_count, 2);
-        assert_eq!(update.proof_published_at, Some(now));
-        assert!(update.proof_next_retry_at.is_none());
-        assert!(update.proof_last_error.is_none());
-    }
-
-    #[test]
-    fn proof_retry_failure_schedules_retry_then_terminal_failure() {
-        let now = Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap();
-        let donation_id = Uuid::new_v4();
-
-        let retry_update =
-            proof_retry_failure_update(donation_id, 1, "temporary sui error".to_owned(), now);
-
-        assert_eq!(retry_update.proof_status, DonationProofStatus::PendingRetry);
-        assert!(retry_update.proof_next_retry_at.is_some());
-        assert_eq!(
-            retry_update.proof_last_error.as_deref(),
-            Some("temporary sui error")
-        );
-
-        let failed_update =
-            proof_retry_failure_update(donation_id, 7, "permanent sui error".to_owned(), now);
-
-        assert_eq!(failed_update.proof_status, DonationProofStatus::Failed);
-        assert!(failed_update.proof_next_retry_at.is_none());
-    }
-
-    #[test]
-    fn document_review_validation_accepts_approval() {
-        let review = validate_document_review_request(&AdminReviewHospitalDocumentRequest {
-            status: "approved".to_owned(),
-            message: Some("ignored for approvals".to_owned()),
-        })
-        .expect("approval should be valid");
-
-        assert_eq!(review.status, HospitalDocumentStatus::Approved);
-        assert!(review.review_message.is_none());
-    }
-
-    #[test]
-    fn document_review_validation_requires_rejection_message() {
-        let error = validate_document_review_request(&AdminReviewHospitalDocumentRequest {
-            status: "rejected".to_owned(),
-            message: Some("   ".to_owned()),
-        })
-        .expect_err("blank rejection reason should fail");
-
-        assert!(matches!(error, ApiError::BadRequest(_)));
-    }
-
-    #[test]
-    fn document_review_validation_rejects_invalid_status() {
-        let error = validate_document_review_request(&AdminReviewHospitalDocumentRequest {
-            status: "pending".to_owned(),
-            message: None,
-        })
-        .expect_err("pending is not a review action");
-
-        assert!(matches!(error, ApiError::BadRequest(_)));
-    }
-
-    #[test]
-    fn document_review_validation_rejects_long_rejection_message() {
-        let error = validate_document_review_request(&AdminReviewHospitalDocumentRequest {
-            status: "rejected".to_owned(),
-            message: Some("x".repeat(MAX_REVIEW_MESSAGE_LENGTH + 1)),
-        })
-        .expect_err("overlong rejection reason should fail");
-
-        assert!(matches!(error, ApiError::BadRequest(_)));
-    }
-
-    #[test]
-    fn document_review_verifies_hospital_when_required_documents_are_approved() {
-        let hospital_id = Uuid::new_v4();
-        let documents = vec![
-            test_hospital_document(
-                hospital_id,
-                HospitalDocumentType::CacCertificate,
-                HospitalDocumentStatus::Approved,
-                None,
-            ),
-            test_hospital_document(
-                hospital_id,
-                HospitalDocumentType::MedicalLicense,
-                HospitalDocumentStatus::Approved,
-                None,
-            ),
-        ];
-
-        assert_eq!(
-            hospital_verification_status_after_document_review(&documents),
-            HospitalVerificationStatus::Verified
-        );
-    }
-
-    #[test]
-    fn document_review_rejects_hospital_when_required_document_is_rejected() {
-        let hospital_id = Uuid::new_v4();
-        let documents = vec![
-            test_hospital_document(
-                hospital_id,
-                HospitalDocumentType::CacCertificate,
-                HospitalDocumentStatus::Approved,
-                None,
-            ),
-            test_hospital_document(
-                hospital_id,
-                HospitalDocumentType::MedicalLicense,
-                HospitalDocumentStatus::Rejected,
-                Some("license expired".to_owned()),
-            ),
-        ];
-
-        assert_eq!(
-            hospital_verification_status_after_document_review(&documents),
-            HospitalVerificationStatus::Rejected
-        );
-    }
-
-    #[test]
-    fn document_review_keeps_hospital_pending_until_all_required_documents_are_approved() {
-        let hospital_id = Uuid::new_v4();
-        let documents = vec![test_hospital_document(
-            hospital_id,
-            HospitalDocumentType::CacCertificate,
-            HospitalDocumentStatus::Approved,
-            None,
-        )];
-
-        assert_eq!(
-            hospital_verification_status_after_document_review(&documents),
-            HospitalVerificationStatus::Pending
-        );
-    }
-
-    #[test]
-    fn document_review_approval_email_mentions_document_and_verification() {
-        let hospital = test_hospital();
-        let document = test_hospital_document(
-            hospital.id,
-            HospitalDocumentType::CacCertificate,
-            HospitalDocumentStatus::Approved,
-            None,
-        );
-
-        let message = hospital_document_review_email_message(
-            &hospital,
-            &document,
-            &HospitalVerificationStatus::Verified,
-        );
-
-        assert!(message.subject.contains("CAC certificate"));
-        assert!(message.text_body.contains("approved"));
-        assert!(message.text_body.contains("verified"));
-    }
-
-    #[test]
-    fn document_review_rejection_email_includes_admin_message() {
-        let hospital = test_hospital();
-        let document = test_hospital_document(
-            hospital.id,
-            HospitalDocumentType::MedicalLicense,
-            HospitalDocumentStatus::Rejected,
-            Some("The license has expired.".to_owned()),
-        );
-
-        let message = hospital_document_review_email_message(
-            &hospital,
-            &document,
-            &HospitalVerificationStatus::Rejected,
-        );
-
-        assert!(message.subject.contains("medical license"));
-        assert!(message.text_body.contains("rejected"));
-        assert!(message.text_body.contains("The license has expired."));
-    }
-
-    #[test]
     fn admin_document_response_includes_review_message() {
         let document = test_hospital_document(
             Uuid::new_v4(),
@@ -1946,44 +1236,6 @@ mod tests {
         let response = AdminHospitalDocumentResponse::from(document);
 
         assert_eq!(response.review_message.as_deref(), Some("blurry image"));
-    }
-
-    fn test_donation(status: DonationStatus, proof_status: DonationProofStatus) -> Donation {
-        let now = Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap();
-        Donation {
-            id: Uuid::new_v4(),
-            medical_case_id: Uuid::new_v4(),
-            donor_display_name: "Ada".to_owned(),
-            donor_email: "ada@example.com".to_owned(),
-            amount_kobo: 10_000,
-            method: DonationMethod::Checkout,
-            paystack_reference: "ref-1".to_owned(),
-            paystack_transaction_reference: None,
-            paystack_access_code: None,
-            paystack_authorization_url: None,
-            paystack_customer_code: None,
-            paystack_dedicated_account_id: None,
-            paystack_dedicated_account_number: None,
-            paystack_dedicated_account_name: None,
-            paystack_dedicated_bank_name: None,
-            paystack_dedicated_bank_slug: None,
-            status,
-            paid_at: None,
-            reservation_expires_at: None,
-            expired_at: None,
-            is_late_payment: false,
-            payment_note: None,
-            proof_status,
-            sui_network: None,
-            sui_tx_digest: None,
-            proof_attempt_count: 0,
-            proof_last_attempt_at: None,
-            proof_next_retry_at: None,
-            proof_last_error: None,
-            proof_published_at: None,
-            created_at: now,
-            updated_at: now,
-        }
     }
 
     fn test_settlement(status: HospitalSettlementStatus) -> HospitalSettlement {
@@ -2007,30 +1259,6 @@ mod tests {
             initiated_at: Some(now),
             paid_at: None,
             failed_at: None,
-            created_at: now,
-            updated_at: now,
-        }
-    }
-
-    fn test_hospital() -> Hospital {
-        let now = Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap();
-        Hospital {
-            id: Uuid::new_v4(),
-            name: "Lagoon Hospital".to_owned(),
-            email: "admin@lagoon.example".to_owned(),
-            email_verified: true,
-            email_verified_at: Some(now),
-            password_hash: "hash".to_owned(),
-            phone_number: Some("+2348012345678".to_owned()),
-            official_address: Some("1 Hospital Road".to_owned()),
-            administrator_name: Some("Dr Jane".to_owned()),
-            cac_registration_number: Some("RC123".to_owned()),
-            medical_license_number: Some("ML123".to_owned()),
-            corporate_account_name: "Lagoon Hospital".to_owned(),
-            corporate_account_number: "0123456789".to_owned(),
-            corporate_bank_code: Some("035".to_owned()),
-            bank_name: "Wema Bank".to_owned(),
-            verification_status: HospitalVerificationStatus::Pending,
             created_at: now,
             updated_at: now,
         }

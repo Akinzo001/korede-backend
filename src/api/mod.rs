@@ -34,6 +34,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::application::{
+    admin_donations::AdminDonationService, admin_hospitals::AdminHospitalService,
     hospital_cases::HospitalCaseService, payments::PaymentApplicationService,
 };
 use crate::port::{
@@ -76,6 +77,8 @@ pub struct AppState {
     pub email_service: Arc<dyn EmailService>,
     pub hospital_case_service: Arc<HospitalCaseService>,
     pub payment_service: Arc<PaymentApplicationService>,
+    pub admin_donation_service: Arc<AdminDonationService>,
+    pub admin_hospital_service: Arc<AdminHospitalService>,
     pub jwt_expires_in_seconds: i64,
     pub refresh_token_expires_in_seconds: i64,
     pub max_upload_bytes: usize,

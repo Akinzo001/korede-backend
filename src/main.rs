@@ -115,6 +115,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.payments.paystack_transfer_source.clone(),
         ),
     );
+    let admin_donation_service = Arc::new(
+        korede_backend::application::admin_donations::AdminDonationService::new(
+            donation_repository.clone(),
+            donation_proof_publisher.clone(),
+        ),
+    );
+    let admin_hospital_service = Arc::new(
+        korede_backend::application::admin_hospitals::AdminHospitalService::new(
+            hospital_repository.clone(),
+            email_service.clone(),
+        ),
+    );
 
     let retry_repository = donation_repository.clone();
     let retry_publisher = donation_proof_publisher.clone();
@@ -144,6 +156,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         email_service,
         hospital_case_service,
         payment_service,
+        admin_donation_service,
+        admin_hospital_service,
         jwt_expires_in_seconds: config.auth.jwt_expires_in_seconds,
         refresh_token_expires_in_seconds: config.auth.refresh_token_expires_in_seconds,
         max_upload_bytes: config.storage.max_upload_bytes,

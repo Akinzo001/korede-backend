@@ -5,7 +5,10 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::application::{hospital_cases::HospitalCaseError, payments::PaymentApplicationError};
+use crate::application::{
+    admin_donations::AdminDonationError, admin_hospitals::AdminHospitalError,
+    hospital_cases::HospitalCaseError, payments::PaymentApplicationError,
+};
 use crate::port::{
     donation::DonationRepositoryError, hospital::HospitalRepositoryError,
     medical_case::MedicalCaseRepositoryError, patient::PatientRepositoryError,
@@ -235,6 +238,32 @@ impl From<PaymentApplicationError> for ApiError {
             PaymentApplicationError::Email(error) => {
                 tracing::error!(%error, "payment notification email failed");
                 Self::Internal("failed to send payment notification email".to_owned())
+            }
+        }
+    }
+}
+
+impl From<AdminDonationError> for ApiError {
+    fn from(error: AdminDonationError) -> Self {
+        match error {
+            AdminDonationError::Validation(message) => Self::BadRequest(message),
+            AdminDonationError::DonationNotFound => Self::NotFound("donation not found".to_owned()),
+            AdminDonationError::Conflict(message) => Self::Conflict(message),
+            AdminDonationError::DonationRepository(error) => error.into(),
+            AdminDonationError::DonationProof(error) => error.into(),
+        }
+    }
+}
+
+impl From<AdminHospitalError> for ApiError {
+    fn from(error: AdminHospitalError) -> Self {
+        match error {
+            AdminHospitalError::Validation(message) => Self::BadRequest(message),
+            AdminHospitalError::HospitalNotFound => Self::NotFound("hospital not found".to_owned()),
+            AdminHospitalError::HospitalRepository(error) => error.into(),
+            AdminHospitalError::Email(error) => {
+                tracing::error!(%error, "hospital document review email failed");
+                Self::Internal("failed to send hospital document review email".to_owned())
             }
         }
     }
