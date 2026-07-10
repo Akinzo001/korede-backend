@@ -7,6 +7,7 @@ pub mod error;
 
 // Expose the health-check routes module.
 pub mod health;
+pub mod hospital_settlements;
 pub mod hospitals;
 mod money;
 pub mod patients;
@@ -102,6 +103,10 @@ pub fn app(state: AppState) -> Router {
         .nest("/api/v1/payments", payments::routes())
         .nest("/api/v1/auth", auth::routes())
         .nest("/api/v1/admin", admin::routes())
+        .nest(
+            "/api/v1/hospitals/settlements",
+            hospital_settlements::routes(),
+        )
         .nest("/api/v1/hospitals", hospitals::routes())
         .nest("/api/v1/patients", patients::routes())
         .layer(DefaultBodyLimit::max(state.max_upload_bytes))

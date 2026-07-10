@@ -20,6 +20,10 @@ use crate::api::{
     },
     cases::{InitializeDonationRequest, InitializeDonationResponse, PublicMedicalCaseResponse},
     health::{DatabaseHealthResponse, HealthResponse},
+    hospital_settlements::{
+        HospitalSettlementHistoryItemResponse, HospitalSettlementHistoryPaginationResponse,
+        HospitalSettlementHistoryResponse,
+    },
     hospitals::{
         Base64DocumentRequest, CreateHospitalCaseBillingItemRequest,
         CreateHospitalCaseDocumentRequest, CreateHospitalCaseRequest, CreateHospitalCaseResponse,
@@ -82,6 +86,7 @@ use crate::api::{
         crate::api::hospitals::get_patient_declaration,
         crate::api::hospitals::list_active_cases,
         crate::api::hospitals::list_completed_cases,
+        crate::api::hospital_settlements::list_settlement_history,
         crate::api::hospitals::create_case,
         crate::api::patients::register_patient,
         crate::api::patients::verify_patient_email,
@@ -148,6 +153,9 @@ use crate::api::{
             HospitalActiveCaseResponse,
             HospitalCompletedCasesResponse,
             HospitalCompletedCaseResponse,
+            HospitalSettlementHistoryResponse,
+            HospitalSettlementHistoryPaginationResponse,
+            HospitalSettlementHistoryItemResponse,
             CreateHospitalCaseRequest,
             CreateHospitalCaseBillingItemRequest,
             CreateHospitalCaseDocumentRequest,
